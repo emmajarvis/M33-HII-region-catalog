@@ -1,0 +1,20 @@
+Created: 2026-02-27T18:47:47
+
+=== Field / parameters ===
+field   = SW
+lap     = 15
+snrlim  = 6
+bgbox   = 30
+stdbox  = 3
+signoi  = 3.0
+
+=== Input files used (as defined in your notebook) ===
+filepeak = peak_files/data_for_visualisation_OIII+Ha_SW/A_PicL15_sizd10.fits
+file = peak_files/2-BG_Noi_Th_data_OIII+Ha_SW/Th_box30_std3_signoi3.0.fits
+
+=== Peak counts ===
+n_TH_peaks          = 1013
+
+=== Output files ===
+csv = final_peak_info/peaks_TH_fieldSW_L15_snr6_bg30_std3_signoi3.csv
+txt = final_peak_info/parameters_fieldSW_L15_snr6_bg30_std3_signoi3.txt

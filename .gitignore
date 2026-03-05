@@ -1,0 +1,10 @@
+*.fits
+*.fit
+*.fz
+*.png
+*.csv
+
+data/
+plots/
+catalogs/
+peak_files/data_for_visualisation_*/
