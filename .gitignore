@@ -8,3 +8,6 @@ data/
 plots/
 catalogs/
 peak_files/data_for_visualisation_*/
+*.pdf
+*.jpg
+*.jpeg
