@@ -4,6 +4,8 @@ import papermill as pm
 import logging
 import sys
 
+# python -Xfrozen_modules=off your_script.py
+
 # --- Logging setup: show papermill streamed output (for your checkpoints)
 logging.basicConfig(
     level=logging.INFO,
@@ -18,9 +20,19 @@ FIELDS = [
 ]
 
 # FIELDS = [
-#      "F7"
+#     "F5", "F6", "F7", "F9"
 # ]
 
+
+# NOTEBOOKS = [
+#     "2a_make_laplace_maps.ipynb",
+#     "2b_make_threshold_maps.ipynb",
+#     "3_finalize_peak_detection.ipynb",
+#     "4_ZoI.ipynb",
+#     "5_domains.ipynb",
+#     "6_flux_catalog_individual_field.ipynb",
+#     "7_create_total_M33_catalog.ipynb",
+# ]
 
 NOTEBOOKS = [
     "2a_make_laplace_maps.ipynb",
