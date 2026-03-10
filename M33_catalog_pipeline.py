@@ -48,10 +48,10 @@ NOTEBOOKS = [
     # "2a_make_laplace_maps.ipynb",
     # "2b_make_threshold_maps.ipynb",
     # "3_finalize_peak_detection.ipynb",
-    "4_ZoI.ipynb",
+    # "4_ZoI.ipynb",
     # "5_domains.ipynb",
-    # "6_flux_catalog_individual_field.ipynb",
-    # "7_create_total_M33_catalog.ipynb",
+    "6_flux_catalog_individual_field.ipynb",
+    "7_create_total_M33_catalog.ipynb",
 ]
 
 OUT_ROOT = Path("executed")
