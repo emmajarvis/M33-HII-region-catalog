@@ -16,7 +16,7 @@ logging.getLogger("papermill").setLevel(logging.INFO)
 
 #Choose which fields you want to run the pipeline for. You can comment out any you want to skip them.
 FIELDS = [
-    "NW", 
+    # "NW", 
     "NE", 
     "SW", 
     "SE",
@@ -29,14 +29,14 @@ FIELDS = [
 
 #Choose which notebooks to run. You can comment out any you want to skip them.
 NOTEBOOKS = [
-    # "2a_make_laplace_maps.ipynb",
-    # "2b_make_threshold_maps.ipynb",
-    # "3_finalize_peak_detection.ipynb",
-    # "4_ZoI.ipynb",
-    # "5_domains.ipynb",
+    "2a_make_laplace_maps.ipynb",
+    "2b_make_threshold_maps.ipynb",
+    "3_finalize_peak_detection.ipynb",
+    "4_ZoI.ipynb",
+    "5_domains.ipynb",
     "6_flux_catalog_individual_field.ipynb",
     "7_create_total_M33_catalog.ipynb",
-    # "8_catalog_plotd.ipynb"
+    # "8_catalog_plots.ipynb"
 ]
 
 OUT_ROOT = Path("executed")
