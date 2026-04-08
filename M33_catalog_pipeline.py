@@ -16,7 +16,7 @@ logging.getLogger("papermill").setLevel(logging.INFO)
 
 #Choose which fields you want to run the pipeline for. You can comment out any you want to skip them.
 FIELDS = [
-    # "NW", 
+    "NW", 
     "NE", 
     "SW", 
     "SE",
