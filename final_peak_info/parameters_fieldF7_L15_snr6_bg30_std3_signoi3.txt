@@ -1,4 +1,4 @@
-Created: 2026-03-23T17:53:34
+Created: 2026-04-16T14:30:04
 
 === Field / parameters ===
 field   = F7
@@ -13,7 +13,7 @@ filepeak = peak_files/data_for_visualisation_OIII+Ha_F7/A_PicL15_sizd10.fits
 file = peak_files/2-BG_Noi_Th_data_OIII+Ha_F7/Th_box30_std3_signoi3.0.fits
 
 === Peak counts ===
-n_TH_peaks          = 1412
+n_TH_peaks          = 981
 
 === Output files ===
 csv = final_peak_info/peaks_TH_fieldF7_L15_snr6_bg30_std3_signoi3.csv

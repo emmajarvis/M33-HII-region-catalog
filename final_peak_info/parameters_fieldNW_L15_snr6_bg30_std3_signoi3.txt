@@ -1,4 +1,4 @@
-Created: 2026-03-23T16:54:02
+Created: 2026-04-16T14:32:07
 
 === Field / parameters ===
 field   = NW
@@ -13,7 +13,7 @@ filepeak = peak_files/data_for_visualisation_OIII+Ha_NW/A_PicL15_sizd10.fits
 file = peak_files/2-BG_Noi_Th_data_OIII+Ha_NW/Th_box30_std3_signoi3.0.fits
 
 === Peak counts ===
-n_TH_peaks          = 1251
+n_TH_peaks          = 1278
 
 === Output files ===
 csv = final_peak_info/peaks_TH_fieldNW_L15_snr6_bg30_std3_signoi3.csv
