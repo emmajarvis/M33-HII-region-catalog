@@ -1,4 +1,4 @@
-Created: 2026-04-24T19:38:07
+Created: 2026-04-28T12:08:38
 
 === Field / parameters ===
 field   = F5
@@ -8,7 +8,7 @@ bgbox   = 25
 stdbox  = 3
 signoi  = 3.0
 
-=== Input files used (as defined in your notebook) ===
+=== Input files used ===
 filepeak = peak_files/data_for_visualisation_OIII+Ha_F5/A_PicL15_sizd10.fits
 file = peak_files/2-BG_Noi_Th_data_OIII+Ha_F5/Th_box25_std3_signoi3.0.fits
 

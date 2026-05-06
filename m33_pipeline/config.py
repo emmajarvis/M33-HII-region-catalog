@@ -17,6 +17,8 @@ class PhotometryConfig:
     max_zoi_pc: int = 100
     edge_ring_iterations: int = 1
     clip_negative_after_bg: bool = False
+    dig_clip_sigma: float = 3.0
+    dig_clip_iterations: int = 2
 
 
 @dataclass(frozen=True)

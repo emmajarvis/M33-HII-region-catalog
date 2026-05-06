@@ -1,0 +1,19 @@
+{
+  "field": "NW",
+  "stage": "make_plots",
+  "summary": {
+    "example_distance_mpc": 20.0,
+    "include_fields": [
+      "NW",
+      "NE",
+      "SW",
+      "SE",
+      "F5",
+      "F7",
+      "F8",
+      "F9"
+    ],
+    "n_outputs": 6
+  },
+  "warnings": []
+}

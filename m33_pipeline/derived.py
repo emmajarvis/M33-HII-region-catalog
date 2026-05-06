@@ -23,8 +23,8 @@ from .io import read_catalog, write_catalog
 C_CM_S = c.c.to_value(u.cm / u.s)
 
 
-def merge_field_flux_catalogs(catalog_dir: Path | None = None) -> pd.DataFrame:
-    catalog_dir = catalog_dir or paths.flux_catalog_dir()
+def merge_field_flux_catalogs(catalog_dir: Path | None = None, method: str = "summed_map", dig_mode: str = "no_dig") -> pd.DataFrame:
+    catalog_dir = catalog_dir or paths.flux_method_dir(method, dig_mode=dig_mode)
     files = sorted(glob.glob(os.path.join(catalog_dir, "flux_catalog_*.csv")))
     dfs = []
     for fp in files:
@@ -39,8 +39,20 @@ def merge_field_flux_catalogs(catalog_dir: Path | None = None) -> pd.DataFrame:
     return pd.concat(dfs, axis=0, ignore_index=True, sort=False)
 
 
-def write_total_flux_catalog(df: pd.DataFrame) -> Path:
-    out_path = paths.total_flux_catalog_csv()
+def write_total_flux_catalog(df: pd.DataFrame, method: str = "summed_map", dig_mode: str = "no_dig") -> Path:
+    out_path = paths.total_flux_catalog_csv(method=method, dig_mode=dig_mode)
+    write_catalog(df, out_path)
+    return out_path
+
+
+def write_combined_catalog(df: pd.DataFrame, method: str = "summed_map", dig_mode: str = "no_dig") -> Path:
+    out_path = paths.combined_catalog_csv(method=method, dig_mode=dig_mode)
+    write_catalog(df, out_path)
+    return out_path
+
+
+def write_derived_stage_catalog(df: pd.DataFrame, stage: str, method: str = "summed_map", dig_mode: str = "no_dig") -> Path:
+    out_path = paths.derived_catalog_csv(stage, method=method, dig_mode=dig_mode)
     write_catalog(df, out_path)
     return out_path
 
@@ -77,6 +89,52 @@ def add_logU_KK04(
     hb, hb_e = _col(prefix, "Hbeta", "sum_dered")
     ha, ha_e = _col(prefix, "Halpha", "sum_dered")
     nii, nii_e = _col(prefix, "[NII]6583", "sum_dered")
+
+    if n_mc <= 1:
+        with np.errstate(divide="ignore", invalid="ignore"):
+            O32 = ((1.0 + 1.0 / 2.98) * out[o3_5007].to_numpy(dtype=float)) / out[oii].to_numpy(dtype=float)
+            logO32 = np.log10(O32)
+            O3N2 = np.log10(
+                (out[o3_5007].to_numpy(dtype=float) / out[hb].to_numpy(dtype=float))
+                * (out[ha].to_numpy(dtype=float) / out[nii].to_numpy(dtype=float))
+            )
+        if metallicity_cal == "M13_O3N2":
+            Z = 8.533 - 0.214 * O3N2
+        elif metallicity_cal == "PP04_O3N2":
+            Z = 8.73 - 0.32 * O3N2
+        else:
+            raise ValueError("metallicity_cal must be 'M13_O3N2' or 'PP04_O3N2'.")
+        logq = kk04_logq_from_logO32_and_Z(logO32, Z)
+        logU = logq - np.log10(C_CM_S)
+        good = (
+            np.isfinite(O32)
+            & np.isfinite(logO32)
+            & np.isfinite(O3N2)
+            & np.isfinite(Z)
+            & np.isfinite(logq)
+            & np.isfinite(logU)
+            & (out[oii].to_numpy(dtype=float) > 0)
+            & (out[o3_5007].to_numpy(dtype=float) > 0)
+            & (out[hb].to_numpy(dtype=float) > 0)
+            & (out[ha].to_numpy(dtype=float) > 0)
+            & (out[nii].to_numpy(dtype=float) > 0)
+        )
+        out["O32"] = np.where(good, O32, np.nan)
+        out["O32_e"] = np.nan
+        out["logO32"] = np.where(good, logO32, np.nan)
+        out["logO32_e"] = np.nan
+        out["O3N2"] = np.where(good, O3N2, np.nan)
+        out["O3N2_e"] = np.nan
+        out["Z_12logOH"] = np.where(good, Z, np.nan)
+        out["Z_12logOH_e"] = np.nan
+        out["logq_KK04"] = np.where(good, logq, np.nan)
+        out["logq_KK04_e"] = np.nan
+        out["logU_KK04"] = np.where(good, logU, np.nan)
+        out["logU_KK04_e"] = np.nan
+        out["logU_flag"] = np.where(np.isfinite(out["logU_KK04"]), "ok", "invalid")
+        out["logU_meta_cal"] = metallicity_cal
+        out["logU_meta_Zscatter_dex"] = Z_intrinsic_sigma_dex if apply_Z_intrinsic_scatter else 0.0
+        return out
 
     rng = np.random.default_rng(seed)
     O32_med = np.full(len(out), np.nan)
@@ -252,6 +310,253 @@ def add_symmetry_class(df: pd.DataFrame, threshold: float = 0.2) -> pd.DataFrame
     return out
 
 
+def add_primary_overlap_flags(
+    df: pd.DataFrame,
+    ra_col: str = "RA_deg",
+    dec_col: str = "Dec_deg",
+    match_radius_arcsec: float = 1.0,
+    snr_cols: list[str] | None = None,
+) -> pd.DataFrame:
+    out = df.copy()
+    out["duplicate_group_id"] = pd.Series([pd.NA] * len(out), dtype="object")
+    out["duplicate_group_size"] = 1
+    out["is_duplicate_overlap"] = False
+    out["primary"] = True
+    out["primary_rank"] = 1
+    out["primary_region_id"] = out["region_id"] if "region_id" in out.columns else pd.Series([pd.NA] * len(out), dtype="object")
+    out["duplicate_score_sum_snr"] = np.nan
+    out["duplicate_score_min_snr"] = np.nan
+    out["duplicate_score_median_snr"] = np.nan
+    out["duplicate_score_finite_nlines"] = 0
+
+    if ra_col not in out.columns or dec_col not in out.columns:
+        raise ValueError(f"Missing coordinate columns for overlap matching: {ra_col}, {dec_col}")
+
+    if snr_cols is None:
+        snr_cols = [
+            col for col in out.columns
+            if col.startswith("SNR_") and col.endswith("_sum")
+        ]
+    if not snr_cols:
+        raise ValueError("No SNR columns found for primary overlap selection.")
+
+    ra = pd.to_numeric(out[ra_col], errors="coerce").to_numpy(dtype=float)
+    dec = pd.to_numeric(out[dec_col], errors="coerce").to_numpy(dtype=float)
+    valid = np.isfinite(ra) & np.isfinite(dec)
+    if valid.sum() == 0:
+        return out
+
+    # Small-angle approximation in arcsec for local duplicate grouping.
+    x_arcsec = ra[valid] * np.cos(np.deg2rad(dec[valid])) * 3600.0
+    y_arcsec = dec[valid] * 3600.0
+    coords = np.column_stack([x_arcsec, y_arcsec])
+    tree = cKDTree(coords)
+    pairs = tree.query_pairs(r=float(match_radius_arcsec))
+    if not pairs:
+        return out
+
+    valid_idx = np.flatnonzero(valid)
+    parent = np.arange(len(valid_idx), dtype=int)
+
+    def find(i: int) -> int:
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    def union(i: int, j: int) -> None:
+        ri, rj = find(i), find(j)
+        if ri != rj:
+            parent[rj] = ri
+
+    for i, j in pairs:
+        union(i, j)
+
+    groups: dict[int, list[int]] = {}
+    for i in range(len(valid_idx)):
+        groups.setdefault(find(i), []).append(i)
+
+    dup_groups = [members for members in groups.values() if len(members) > 1]
+    if not dup_groups:
+        return out
+
+    snr_frame = out[snr_cols].apply(pd.to_numeric, errors="coerce")
+    score_sum = snr_frame.sum(axis=1, min_count=1).to_numpy(dtype=float)
+    score_min = snr_frame.min(axis=1, skipna=True).to_numpy(dtype=float)
+    score_median = snr_frame.median(axis=1, skipna=True).to_numpy(dtype=float)
+    score_count = snr_frame.notna().sum(axis=1).to_numpy(dtype=int)
+    out["duplicate_score_sum_snr"] = score_sum
+    out["duplicate_score_min_snr"] = score_min
+    out["duplicate_score_median_snr"] = score_median
+    out["duplicate_score_finite_nlines"] = score_count
+
+    for group_num, members in enumerate(dup_groups, start=1):
+        rows = valid_idx[np.asarray(members, dtype=int)]
+        group_id = f"dup_{group_num:04d}"
+        out.loc[rows, "duplicate_group_id"] = group_id
+        out.loc[rows, "duplicate_group_size"] = int(len(rows))
+        out.loc[rows, "is_duplicate_overlap"] = True
+        out.loc[rows, "primary"] = False
+
+        def score_tuple(row_idx: int):
+            return (
+                int(score_count[row_idx]),
+                float(score_min[row_idx]) if np.isfinite(score_min[row_idx]) else -np.inf,
+                float(score_median[row_idx]) if np.isfinite(score_median[row_idx]) else -np.inf,
+                float(score_sum[row_idx]) if np.isfinite(score_sum[row_idx]) else -np.inf,
+            )
+
+        primary_row = max(rows, key=score_tuple)
+        ordered_rows = sorted(rows, key=score_tuple, reverse=True)
+        out.loc[primary_row, "primary"] = True
+        primary_region_id = out.loc[primary_row, "region_id"] if "region_id" in out.columns else primary_row
+        out.loc[rows, "primary_region_id"] = primary_region_id
+        for rank, row_idx in enumerate(ordered_rows, start=1):
+            out.loc[row_idx, "primary_rank"] = rank
+
+    return out
+
+
+def _normalize_region_id(field: str, region_id) -> str | None:
+    if pd.isna(region_id):
+        return None
+    rid = str(region_id).strip()
+    if "_" in rid:
+        return rid
+    try:
+        label = int(round(float(rid)))
+    except ValueError:
+        return None
+    return f"{field}_{label:04d}"
+
+
+def _parse_wr_name_to_coord(name: str):
+    from astropy.coordinates import SkyCoord
+
+    name = str(name).strip()
+    if not name.startswith("J") or len(name) < 16:
+        raise ValueError(f"Unrecognized WR source name format: {name}")
+    ra_h = name[1:3]
+    ra_m = name[3:5]
+    ra_s = name[5:10]
+    dec_sign = name[10]
+    dec_d = name[11:13]
+    dec_m = name[13:15]
+    dec_s = name[15:]
+    ra_str = f"{ra_h}h{ra_m}m{ra_s}s"
+    dec_str = f"{dec_sign}{dec_d}d{dec_m}m{dec_s}s"
+    return SkyCoord(ra_str, dec_str, frame="icrs")
+
+
+def add_boundary_source_flags(
+    df: pd.DataFrame,
+    max_zoi_pc: int = 100,
+    wr_catalog: pd.DataFrame | None = None,
+    snr_catalog: pd.DataFrame | None = None,
+) -> pd.DataFrame:
+    from astropy.coordinates import SkyCoord
+    from astropy.io import fits
+    from astropy.wcs import WCS
+    import astropy.units as u
+
+    from .reporting import load_snr_catalog, load_wr_catalog
+
+    out = df.copy()
+    out["has_wr_in_boundary"] = False
+    out["n_wr_in_boundary"] = 0
+    out["wr_names_in_boundary"] = ""
+    out["has_snr_in_boundary"] = False
+    out["n_snr_in_boundary"] = 0
+
+    wr_catalog = load_wr_catalog() if wr_catalog is None else wr_catalog.copy()
+    snr_catalog = load_snr_catalog() if snr_catalog is None else snr_catalog.copy()
+
+    wr_coords = []
+    wr_names = []
+    if not wr_catalog.empty and "Name (star)" in wr_catalog.columns:
+        for name in wr_catalog["Name (star)"]:
+            try:
+                wr_coords.append(_parse_wr_name_to_coord(name))
+                wr_names.append(str(name).strip())
+            except Exception:
+                continue
+    wr_sky = SkyCoord(wr_coords) if wr_coords else None
+
+    snr_sky = None
+    if not snr_catalog.empty and {"RA", "Dec"}.issubset(snr_catalog.columns):
+        try:
+            snr_sky = SkyCoord(
+                snr_catalog["RA"].astype(str).to_numpy(),
+                snr_catalog["Dec"].astype(str).to_numpy(),
+                unit=(u.hourangle, u.deg),
+            )
+        except Exception:
+            snr_sky = None
+
+    for field in sorted(out["field"].dropna().astype(str).unique()):
+        field_mask = out["field"].astype(str) == field
+        field_idx = out.index[field_mask]
+        if len(field_idx) == 0:
+            continue
+
+        boundary_path = paths.boundary_fits(field, max_zoi_pc)
+        wcs_candidates = [
+            paths.field_map_dir(field) / f"M33{field}-Haflux.fits",
+            paths.field_map_dir(field) / f"M33-{field}_SN3.LineMaps.map.Ha+OIII.1x1.amplitude.fits",
+            paths.field_map_dir(field) / f"M33{field}-SN3Continuum.fits",
+        ]
+        wcs_path = next((p for p in wcs_candidates if p.exists()), None)
+        if not boundary_path.exists() or wcs_path is None:
+            continue
+
+        boundary = fits.getdata(boundary_path)
+        boundary = np.asarray(boundary, dtype=float)
+        wcs = WCS(fits.getheader(wcs_path))
+
+        label_to_rows: dict[int, list[int]] = {}
+        for row_idx in field_idx:
+            row = out.loc[row_idx]
+            region_id = row["region_id"] if "region_id" in out.columns else np.nan
+            normalized = _normalize_region_id(field, region_id)
+            if normalized is None and "zoi_center_label" in out.columns and np.isfinite(row.get("zoi_center_label", np.nan)):
+                label = int(round(float(row["zoi_center_label"])))
+            else:
+                try:
+                    label = int(normalized.split("_")[-1])
+                except Exception:
+                    continue
+            label_to_rows.setdefault(label, []).append(row_idx)
+
+        def _assign_hits(skycoords, names, count_col, flag_col, names_col=None):
+            if skycoords is None or len(skycoords) == 0:
+                return
+            xs, ys = wcs.world_to_pixel(skycoords)
+            for src_i, (x, y) in enumerate(zip(xs, ys)):
+                if not (np.isfinite(x) and np.isfinite(y)):
+                    continue
+                xi = int(round(float(x)))
+                yi = int(round(float(y)))
+                if yi < 0 or yi >= boundary.shape[0] or xi < 0 or xi >= boundary.shape[1]:
+                    continue
+                label_val = boundary[yi, xi]
+                if not np.isfinite(label_val) or label_val <= 0:
+                    continue
+                label = int(round(float(label_val)))
+                rows = label_to_rows.get(label, [])
+                for row_idx in rows:
+                    out.at[row_idx, count_col] = int(out.at[row_idx, count_col]) + 1
+                    out.at[row_idx, flag_col] = True
+                    if names_col is not None:
+                        current = str(out.at[row_idx, names_col]).strip()
+                        new_name = str(names[src_i]).strip()
+                        out.at[row_idx, names_col] = new_name if current == "" else f"{current}; {new_name}"
+
+        _assign_hits(wr_sky, wr_names, "n_wr_in_boundary", "has_wr_in_boundary", "wr_names_in_boundary")
+        _assign_hits(snr_sky, [f"SNR_{i+1}" for i in range(len(snr_sky))] if snr_sky is not None else [], "n_snr_in_boundary", "has_snr_in_boundary")
+
+    return out
+
+
 def poly_eval(coeffs, z):
     return np.polyval(coeffs[::-1], z)
 
@@ -270,8 +575,17 @@ def invert_logR_to_Z(coeffs, logR_obs, z_min=6.5, z_max=9.5, ngrid=2000):
         return np.nan
     signs = np.sign(fgrid)
     idx = np.where(signs[:-1] * signs[1:] < 0)[0]
+    # If there is no bracketed root, the observed ratio is outside the usable
+    # range of this calibration (or lands on an ambiguous branch). Returning the
+    # nearest grid edge creates artificial "flat line" metallicities in plots, so
+    # treat these cases as invalid.
     if idx.size == 0:
-        return zgrid[np.argmin(np.abs(fgrid))]
+        best_i = int(np.argmin(np.abs(fgrid)))
+        best_abs = float(np.abs(fgrid[best_i]))
+        at_edge = best_i == 0 or best_i == (zgrid.size - 1)
+        if (not at_edge) and best_abs < 1e-3:
+            return zgrid[best_i]
+        return np.nan
     best_i = None
     best_val = np.inf
     for i in idx:
@@ -284,7 +598,7 @@ def invert_logR_to_Z(coeffs, logR_obs, z_min=6.5, z_max=9.5, ngrid=2000):
     try:
         return brentq(lambda z: poly_eval(coeffs, z) - logR_obs, a, b, maxiter=200)
     except ValueError:
-        return zgrid[np.argmin(np.abs(fgrid))]
+        return np.nan
 
 
 def odr_refine_z(coeffs, logR_obs, z0, sx=1.0, sy=1.0):
@@ -298,7 +612,12 @@ def odr_refine_z(coeffs, logR_obs, z0, sx=1.0, sy=1.0):
     model = odr.Model(f)
     data = odr.RealData(np.array([0.0]), np.array([logR_obs]), sx=np.array([sx]), sy=np.array([sy]))
     out = odr.ODR(data, model, beta0=[z0]).run()
-    return out.beta[0]
+    z_fit = out.beta[0]
+    if not np.isfinite(z_fit):
+        return np.nan
+    if z_fit < 6.5 or z_fit > 9.5:
+        return np.nan
+    return z_fit
 
 
 @dataclass(frozen=True)
@@ -354,9 +673,9 @@ def compute_metallicities(full_catalog, z_min=6.5, z_max=9.5, use_odr=True, sx=1
     return out
 
 
-def add_metallicity_columns(df: pd.DataFrame) -> pd.DataFrame:
+def add_metallicity_columns(df: pd.DataFrame, use_odr: bool = True) -> pd.DataFrame:
     out = df.copy()
-    z_dict = compute_metallicities(out, use_odr=True)
+    z_dict = compute_metallicities(out, use_odr=use_odr)
     out["Z_N2_Brazzini2024"] = z_dict["N2_Brazzini2024"] + 8.69
     out["Z_O3N2_Brazzini2024"] = z_dict["O3N2_Brazzini2024"] + 8.69
     out["Z_N2S2Halpha_Brazzini2024"] = z_dict["N2S2Halpha_Brazzini2024"] + 8.69
@@ -377,31 +696,32 @@ def add_metallicity_columns(df: pd.DataFrame) -> pd.DataFrame:
     sii = sii1 + sii2
     oiii = np.asarray(out[mask]["F_[OIII]5007_sum_dered"], float)
     oii = np.asarray(out[mask]["F_[OII]3727_sum_dered"], float)
-    n2 = nii / ha
-    s2 = (sii1 + sii2) / ha
-    r3 = (1 + 1 / 2.89) * oiii / hb
-    r2 = oii / hb
-    out["Z_R_Pilyugin2016_highN2"] = 8.589 + 0.022 * np.log10(r3 / r2) + 0.399 * np.log10(n2) + (-0.137 + 0.164 * np.log10(r3 / r2) + 0.589 * np.log10(n2)) * np.log10(r2)
-    out["Z_R_Pilyugin2016_lowN2"] = 7.932 + 0.944 * np.log10(r3 / r2) + 0.695 * np.log10(n2) + (0.970 - 0.291 * np.log10(r3 / r2) - 0.019 * np.log10(n2)) * np.log10(r2)
-    out["Z_S_Pilyugin2016_highN2"] = 8.424 + 0.030 * np.log10(r3 / s2) + 0.751 * np.log10(n2) + (-0.349 + 0.182 * np.log10(r3 / s2) + 0.508 * np.log10(n2)) * np.log10(s2)
-    out["Z_S_Pilyugin2016_lowN2"] = 8.072 + 0.789 * np.log10(r3 / s2) + 0.726 * np.log10(n2) + (1.069 - 0.170 * np.log10(r3 / s2) + 0.022 * np.log10(n2)) * np.log10(s2)
-    r23 = (oiii + oii) / hb
-    o32 = oiii / oii
-    x = np.log10(r23)
-    y = np.log10(o32)
-    out["Z_R23_KK2004"] = 9.11 - 0.218 * x - 0.0587 * x**2 - 0.330 * x**3 - 0.199 * x**4 - y * (0.00235 - 0.1105 * x - 0.051 * x**2 - 0.04085 * x**3 - 0.003585 * x**4)
-    out["Z_NII_KD2002"] = np.log10(1.54020 + 1.26602 * nii / oii + 0.167977 * (nii / oii) ** 2) + 8.93
-    y = np.log10(nii / sii) + 0.264 * np.log10(nii / ha)
-    out["Z_D2016"] = 8.77 + y
-    out["Z_O3N2_M2013"] = 8.533 - 0.214 * np.log10((oiii / hb) / n2)
-    out["Z_N2_M2013"] = 8.743 + 0.462 * np.log10(n2)
-    out["Z_C2001"] = np.log10(5.09e-4 * (oii / oiii) ** 0.17 * (nii / sii / 0.85) ** 1.17) + 12.0
-    out["Z_N2_PP2004"] = 9.37 + 2.03 * np.log10(n2) + 1.26 * np.log10(n2) ** 2 + 0.32 * np.log10(n2) ** 3
-    out["Z_O3N2_PP2004"] = 8.73 - 0.32 * np.log10((oiii / hb) / n2)
-    out["Z_N2_Brown2016"] = 9.12 + 0.58 * np.log10(n2)
-    out["Z_O3N2_Brown2016"] = 8.98 - 0.32 * np.log10((oiii / hb) / n2)
-    out["Z_N2O2_Brown2016"] = 9.20 + 0.54 * np.log10(nii / oii)
-    out["Z_N2O2_KD2002"] = np.log10(1.54020 + 1.26602 * nii / oii + 0.167977 * (nii / oii) ** 2) + 8.93
+    with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
+        n2 = nii / ha
+        s2 = (sii1 + sii2) / ha
+        r3 = (1 + 1 / 2.89) * oiii / hb
+        r2 = oii / hb
+        out["Z_R_Pilyugin2016_highN2"] = 8.589 + 0.022 * np.log10(r3 / r2) + 0.399 * np.log10(n2) + (-0.137 + 0.164 * np.log10(r3 / r2) + 0.589 * np.log10(n2)) * np.log10(r2)
+        out["Z_R_Pilyugin2016_lowN2"] = 7.932 + 0.944 * np.log10(r3 / r2) + 0.695 * np.log10(n2) + (0.970 - 0.291 * np.log10(r3 / r2) - 0.019 * np.log10(n2)) * np.log10(r2)
+        out["Z_S_Pilyugin2016_highN2"] = 8.424 + 0.030 * np.log10(r3 / s2) + 0.751 * np.log10(n2) + (-0.349 + 0.182 * np.log10(r3 / s2) + 0.508 * np.log10(n2)) * np.log10(s2)
+        out["Z_S_Pilyugin2016_lowN2"] = 8.072 + 0.789 * np.log10(r3 / s2) + 0.726 * np.log10(n2) + (1.069 - 0.170 * np.log10(r3 / s2) + 0.022 * np.log10(n2)) * np.log10(s2)
+        r23 = (oiii + oii) / hb
+        o32 = oiii / oii
+        x = np.log10(r23)
+        y = np.log10(o32)
+        out["Z_R23_KK2004"] = 9.11 - 0.218 * x - 0.0587 * x**2 - 0.330 * x**3 - 0.199 * x**4 - y * (0.00235 - 0.1105 * x - 0.051 * x**2 - 0.04085 * x**3 - 0.003585 * x**4)
+        out["Z_NII_KD2002"] = np.log10(1.54020 + 1.26602 * nii / oii + 0.167977 * (nii / oii) ** 2) + 8.93
+        y = np.log10(nii / sii) + 0.264 * np.log10(nii / ha)
+        out["Z_D2016"] = 8.77 + y
+        out["Z_O3N2_M2013"] = 8.533 - 0.214 * np.log10((oiii / hb) / n2)
+        out["Z_N2_M2013"] = 8.743 + 0.462 * np.log10(n2)
+        out["Z_C2001"] = np.log10(5.09e-4 * (oii / oiii) ** 0.17 * (nii / sii / 0.85) ** 1.17) + 12.0
+        out["Z_N2_PP2004"] = 9.37 + 2.03 * np.log10(n2) + 1.26 * np.log10(n2) ** 2 + 0.32 * np.log10(n2) ** 3
+        out["Z_O3N2_PP2004"] = 8.73 - 0.32 * np.log10((oiii / hb) / n2)
+        out["Z_N2_Brown2016"] = 9.12 + 0.58 * np.log10(n2)
+        out["Z_O3N2_Brown2016"] = 8.98 - 0.32 * np.log10((oiii / hb) / n2)
+        out["Z_N2O2_Brown2016"] = 9.20 + 0.54 * np.log10(nii / oii)
+        out["Z_N2O2_KD2002"] = np.log10(1.54020 + 1.26602 * nii / oii + 0.167977 * (nii / oii) ** 2) + 8.93
     return out
 
 
@@ -511,13 +831,31 @@ def add_metallicity_error_columns(df: pd.DataFrame, n_mc: int = 500, seed: int =
         if min(e_ha, e_hb, e_nii, e_sii1, e_sii2, e_oiii, e_oii) < 0:
             continue
 
-        d_ha = np.clip(safe_normal(rng, f_ha, e_ha, n_mc), 1e-30, None)
-        d_hb = np.clip(safe_normal(rng, f_hb, e_hb, n_mc), 1e-30, None)
-        d_nii = np.clip(safe_normal(rng, f_nii, e_nii, n_mc), 1e-30, None)
-        d_sii1 = np.clip(safe_normal(rng, f_sii1, e_sii1, n_mc), 1e-30, None)
-        d_sii2 = np.clip(safe_normal(rng, f_sii2, e_sii2, n_mc), 1e-30, None)
-        d_oiii = np.clip(safe_normal(rng, f_oiii, e_oiii, n_mc), 1e-30, None)
-        d_oii = np.clip(safe_normal(rng, f_oii, e_oii, n_mc), 1e-30, None)
+        # d_ha = np.clip(safe_normal(rng, f_ha, e_ha, n_mc), 1e-30, None)
+        # d_hb = np.clip(safe_normal(rng, f_hb, e_hb, n_mc), 1e-30, None)
+        # d_nii = np.clip(safe_normal(rng, f_nii, e_nii, n_mc), 1e-30, None)
+        # d_sii1 = np.clip(safe_normal(rng, f_sii1, e_sii1, n_mc), 1e-30, None)
+        # d_sii2 = np.clip(safe_normal(rng, f_sii2, e_sii2, n_mc), 1e-30, None)
+        # d_oiii = np.clip(safe_normal(rng, f_oiii, e_oiii, n_mc), 1e-30, None)
+        # d_oii = np.clip(safe_normal(rng, f_oii, e_oii, n_mc), 1e-30, None)
+        
+        d_ha = safe_normal(rng, f_ha, e_ha, n_mc)
+        d_hb = safe_normal(rng, f_hb, e_hb, n_mc)
+        d_nii = safe_normal(rng, f_nii, e_nii, n_mc)
+        d_sii1 = safe_normal(rng, f_sii1, e_sii1, n_mc)
+        d_sii2 = safe_normal(rng, f_sii2, e_sii2, n_mc)
+        d_oiii = safe_normal(rng, f_oiii, e_oiii, n_mc)
+        d_oii = safe_normal(rng, f_oii, e_oii, n_mc)
+
+        good = (
+            (d_ha > 0) & (d_hb > 0) & (d_nii > 0) &
+            (d_sii1 > 0) & (d_sii2 > 0) &
+            (d_oiii > 0) & (d_oii > 0)
+        )
+
+        d_ha, d_hb, d_nii = d_ha[good], d_hb[good], d_nii[good]
+        d_sii1, d_sii2 = d_sii1[good], d_sii2[good]
+        d_oiii, d_oii = d_oiii[good], d_oii[good]
 
         with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
             N2 = d_nii / d_ha
@@ -733,11 +1071,18 @@ def add_clustering_metrics(
     return out, global_stats, ripley_df, pcf_df
 
 
-def write_clustering_outputs(df: pd.DataFrame, global_stats: pd.DataFrame, ripley_df: pd.DataFrame, pcf_df: pd.DataFrame) -> dict[str, Path]:
-    out_catalog = paths.flux_catalog_dir() / "total_flux_catalog_with_deprojected_clustering_metrics.csv"
-    out_global = paths.flux_catalog_dir() / "clustering_global_statistics.csv"
-    out_ripley = paths.flux_catalog_dir() / "clustering_ripley_profile.csv"
-    out_pcf = paths.flux_catalog_dir() / "clustering_pair_correlation_profile.csv"
+def write_clustering_outputs(
+    df: pd.DataFrame,
+    global_stats: pd.DataFrame,
+    ripley_df: pd.DataFrame,
+    pcf_df: pd.DataFrame,
+    method: str = "summed_map",
+    dig_mode: str = "no_dig",
+) -> dict[str, Path]:
+    out_catalog = paths.derived_catalog_csv("clustering", method=method, dig_mode=dig_mode)
+    out_global = paths.derived_catalog_dir(method, dig_mode=dig_mode) / "clustering_global_statistics.csv"
+    out_ripley = paths.derived_catalog_dir(method, dig_mode=dig_mode) / "clustering_ripley_profile.csv"
+    out_pcf = paths.derived_catalog_dir(method, dig_mode=dig_mode) / "clustering_pair_correlation_profile.csv"
     write_catalog(df, out_catalog)
     write_catalog(global_stats, out_global)
     write_catalog(ripley_df, out_ripley)
@@ -745,9 +1090,9 @@ def write_clustering_outputs(df: pd.DataFrame, global_stats: pd.DataFrame, riple
     return {"catalog": out_catalog, "global": out_global, "ripley": out_ripley, "pcf": out_pcf}
 
 
-def build_total_catalog(config: DerivedConfig | None = None):
+def build_total_catalog(config: DerivedConfig | None = None, method: str = "summed_map", dig_mode: str = "no_dig"):
     config = config or DerivedConfig()
-    all_catalog = merge_field_flux_catalogs()
+    all_catalog = merge_field_flux_catalogs(method=method, dig_mode=dig_mode)
     cat = add_logU_KK04(all_catalog.copy(), n_mc=config.logu_n_mc)
     density = add_electron_density(cat.copy(), n_mc=config.density_n_mc)
     symmetry = add_symmetry_class(density.copy())

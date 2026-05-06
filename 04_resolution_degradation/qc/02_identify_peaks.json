@@ -1,0 +1,28 @@
+{
+  "field": null,
+  "stage": "identify_peaks",
+  "summary": {
+    "distances_mpc": [
+      0.84,
+      5.0,
+      10.0,
+      20.0,
+      35.0,
+      50.0,
+      100.0
+    ],
+    "fields": [
+      "NW",
+      "NE",
+      "SW",
+      "SE",
+      "F5",
+      "F6",
+      "F7",
+      "F8",
+      "F9"
+    ],
+    "n_peaks": 11339
+  },
+  "warnings": []
+}

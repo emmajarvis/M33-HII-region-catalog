@@ -82,17 +82,85 @@ def degrade_map_to_distance(
     peak_edgecolor: str = "black",
     peak_linewidth: float = 0.8,
 ):
+    image = np.asarray(image, dtype=float)
+    finite_mask = np.isfinite(image)
+    if not np.any(finite_mask):
+        spatial_resolution_pc = ((fwhm_psf_orig if fwhm_instr is None else fwhm_instr) * d_target * 1e6) / 206265.0
+        return np.full_like(image, np.nan, dtype=float), pixscale_orig, spatial_resolution_pc
+
+    if np.isclose(d_target, d_orig) and (fwhm_instr is None or np.isclose(fwhm_instr, fwhm_psf_orig)):
+        degraded = image.copy()
+        pixscale_new = pixscale_orig
+        spatial_resolution_pc = (fwhm_psf_orig * d_target * 1e6) / 206265.0
+        peaks = None
+        n_peaks = 0
+        if overlay_peaks:
+            try:
+                peaks, xcol, ycol, _ = load_peak_catalog_for_distance(
+                    d_target,
+                    d_orig=d_orig,
+                    orig_file=orig_file,
+                    peaks_dir=peaks_dir,
+                    peak_filename_template=peak_filename_template,
+                )
+                n_peaks = len(peaks)
+            except Exception as exc:
+                print(f"Could not read peak file for {d_target} Mpc: {exc}")
+
+        if plot:
+            created_fig = False
+            if ax is None:
+                _, ax = plt.subplots(figsize=(8, 12))
+                created_fig = True
+            finite = degraded[np.isfinite(degraded) & (degraded > 0)]
+            norm = None
+            if finite.size:
+                vmin = np.nanpercentile(finite, 20)
+                vmax = np.nanpercentile(finite, 99)
+                norm = plt.matplotlib.colors.LogNorm(vmin=max(vmin, np.nextafter(0, 1)), vmax=max(vmax, vmin * 1.01))
+            im = ax.imshow(degraded, origin="lower", cmap="rainbow", norm=norm)
+            ax.text(
+                0.03,
+                0.97,
+                f"Dist: {d_target} Mpc\nRes: {spatial_resolution_pc:.1f} pc\n# Peaks: {n_peaks}",
+                color="k",
+                fontsize=20,
+                bbox=dict(facecolor="white", alpha=0.7, edgecolor="none", pad=2),
+                transform=ax.transAxes,
+                ha="left",
+                va="top",
+            )
+            if peaks is not None and len(peaks) > 0:
+                ax.scatter(
+                    peaks[xcol].values,
+                    peaks[ycol].values,
+                    s=peak_size,
+                    marker=peak_marker,
+                    facecolors=peak_color,
+                    edgecolors=peak_edgecolor,
+                    linewidths=peak_linewidth,
+                    zorder=5,
+                )
+            ax.set_xticks([])
+            ax.set_yticks([])
+            if created_fig:
+                plt.colorbar(im, ax=ax)
+                plt.tight_layout()
+        return degraded, pixscale_new, spatial_resolution_pc
+
     scale = 1e14
     image_scaled = image * scale
 
-    mask = np.isnan(image_scaled)
-    image_filled = np.nan_to_num(image_scaled, nan=0.0)
+    mask = ~np.isfinite(image_scaled)
+    image_filled = np.where(mask, 0.0, image_scaled)
 
     scale_factor = d_orig / d_target
     pixscale_new = pixscale_orig / scale_factor
 
     resampled = zoom(image_filled, scale_factor, order=1)
     mask_resampled = zoom(mask.astype(float), scale_factor, order=0) > 0.5
+    resampled = np.where(np.isfinite(resampled), resampled, 0.0)
+    mask_resampled |= ~np.isfinite(resampled)
 
     fwhm_target = fwhm_psf_orig if fwhm_instr is None else fwhm_instr
 
@@ -104,15 +172,21 @@ def degrade_map_to_distance(
     sigma_kernel = np.sqrt(max(0.0, sigma_targ**2 - sigma_curr**2))
     kernel = Gaussian2DKernel(sigma_kernel if sigma_kernel > 0 else 1e-8)
 
-    degraded = convolve_fft(
-        resampled,
-        kernel,
-        boundary="fill",
-        fill_value=0.0,
-        preserve_nan=False,
-        normalize_kernel=True,
-        mask=mask_resampled,
-    )
+    if sigma_kernel <= 1e-12:
+        degraded = resampled.copy()
+    else:
+        degraded = convolve_fft(
+            resampled,
+            kernel,
+            boundary="fill",
+            fill_value=0.0,
+            preserve_nan=False,
+            normalize_kernel=True,
+            nan_treatment="fill",
+            allow_huge=True,
+            mask=mask_resampled,
+        )
+        degraded = np.where(np.isfinite(degraded), degraded, 0.0)
 
     degraded[mask_resampled] = np.nan
     degraded /= scale
@@ -400,6 +474,14 @@ def polygon_from_polar(cx, cy, thetas, radii):
     return np.vstack([xs, ys]).T
 
 
+def polygon_area(poly_xy):
+    if len(poly_xy) < 3:
+        return np.nan
+    x = np.asarray(poly_xy[:, 0], dtype=float)
+    y = np.asarray(poly_xy[:, 1], dtype=float)
+    return 0.5 * np.abs(np.dot(x, np.roll(y, -1)) - np.dot(y, np.roll(x, -1)))
+
+
 def rasterize_polygon_to_mask(shape, poly_xy):
     if len(poly_xy) < 3:
         return np.zeros(shape, dtype=bool)
@@ -491,7 +573,7 @@ def build_boundary_map(
     n_theta: int = 72,
     r_bin: float = 2.0,
     smooth_sigma: float = 1.2,
-    edge_frac: float = 1.0,
+    edge_frac: float = 0.5,
     fallback_sig_k: float = 1.0,
     ang_win_sectors: int | None = None,
     mad_k_clip: float = 2.2,
@@ -501,6 +583,8 @@ def build_boundary_map(
     sg_window: int = 7,
     sg_poly: int = 2,
     global_p95_cap: bool = True,
+    zoi_fallback_distance_mpc: float = 10.0,
+    zoi_fallback_npix_threshold: int = 8,
 ) -> tuple[np.ndarray, pd.DataFrame]:
     if ang_win_sectors is None:
         ang_win_sectors = max(5, (n_theta // 8) * 2 + 1)
@@ -597,9 +681,18 @@ def build_boundary_map(
         poly_global[:, 0] += x0
         poly_global[:, 1] += y0
 
+        continuous_area_px = polygon_area(poly_global)
+        radius_eq_cont_px = float(np.sqrt(continuous_area_px / np.pi)) if np.isfinite(continuous_area_px) and continuous_area_px > 0 else np.nan
+        use_zoi_fallback = (
+            float(row["distance_mpc"]) >= zoi_fallback_distance_mpc
+            or np.count_nonzero(zoi_mask_full) <= zoi_fallback_npix_threshold
+        )
         boundary_mask = rasterize_polygon_to_mask(image.shape, poly_global)
         boundary_mask &= zoi_mask_full
         if not np.any(boundary_mask):
+            boundary_mask = zoi_mask_full.copy()
+            use_zoi_fallback = True
+        elif use_zoi_fallback:
             boundary_mask = zoi_mask_full.copy()
         region_masks[region_label] = boundary_mask
         center_by_label[region_label] = (int(round(cx)), int(round(cy)))
@@ -607,6 +700,7 @@ def build_boundary_map(
         area_px = float(np.count_nonzero(boundary_mask))
         radius_eq_px = float(np.sqrt(area_px / np.pi)) if area_px > 0 else np.nan
         radius_eq_pc = radius_eq_px * pixel_scale_pc if np.isfinite(radius_eq_px) else np.nan
+        radius_eq_cont_pc = radius_eq_cont_px * pixel_scale_pc if np.isfinite(radius_eq_cont_px) else np.nan
 
         vals = image[boundary_mask]
         vals = vals[np.isfinite(vals)]
@@ -635,11 +729,14 @@ def build_boundary_map(
                 "radius_p50_pc": float(r50_px * pixel_scale_pc) if np.isfinite(r50_px) else np.nan,
                 "radius_p84_pc": float(r84_px * pixel_scale_pc) if np.isfinite(r84_px) else np.nan,
                 "radius_pc_eq": radius_eq_pc,
+                "area_px_cont": float(continuous_area_px) if np.isfinite(continuous_area_px) else np.nan,
+                "radius_px_eq_cont": radius_eq_cont_px,
+                "radius_pc_eq_cont": radius_eq_cont_pc,
                 "n_pix": int(area_px),
                 "area_pc2": float(area_px * pixel_scale_pc**2),
                 "region_flux_sum": region_flux,
                 "luminosity": luminosity,
-                "boundary_method": "ANG_MAD+SLOPE+NEIGH+SG+CLAMP",
+                "boundary_method": "ZOI_FALLBACK" if use_zoi_fallback else "ANG_MAD+SLOPE+NEIGH+SG+CLAMP",
             }
         )
 
@@ -664,6 +761,10 @@ def build_boundary_map(
         np.sqrt(metrics_df["area_pc2"] / np.pi),
         np.nan,
     )
+    metrics_df["radius_pc_eq_effective"] = metrics_df["radius_pc_eq"]
+    zoi_fallback_mask = metrics_df["boundary_method"] == "ZOI_FALLBACK"
+    finite_cont_mask = zoi_fallback_mask & np.isfinite(metrics_df["radius_pc_eq_cont"])
+    metrics_df.loc[finite_cont_mask, "radius_pc_eq_effective"] = metrics_df.loc[finite_cont_mask, "radius_pc_eq_cont"]
 
     for idx, row in metrics_df.iterrows():
         lab = int(row["zoi_center_label"])

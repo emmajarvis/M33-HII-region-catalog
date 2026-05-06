@@ -1,0 +1,11 @@
+- [ ]  Reorganize pipeline:
+    - [ ]  One notebook for degrading maps to specified distances
+    - [ ]  One notebook for identifying peaks for each map
+    - [ ]  One notebook for getting ZoI (set max ZoI to 200pc or for distances >50Mpc, set max size to 500pc) and then getting a boundary within the ZoI by fitting the flux profile (but modify so it works for the resolutions)
+    - [ ]  One notebook for summing fluxes for degraded maps to get “catalog” at each distance and using strong line indicators to get density, ionization param and one metallicity indicator
+        - [ ]  Be sure to calculate correct galactocentric radius for each region based on M33’s properties
+    - [ ]  One notebook for loading in the catalogs and making plots
+        - [ ]  one plot of one field with peaks identified, like I already have
+        - [ ]  One plot for luminosity vs radius (like I already have) and add a fit line for each distance
+        - [ ]  One plot for different derived properties as a function of galactocentric radius
+- [ ]  Add in all the fields into the analysis for the final “catalog” at each distance and remake all plots

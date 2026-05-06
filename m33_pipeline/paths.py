@@ -37,13 +37,25 @@ def flux_catalog_dir() -> Path:
     return repo_root() / "CATALOGS" / "flux_catalogs"
 
 
-def flux_catalog_csv(field: str) -> Path:
-    return flux_catalog_dir() / f"flux_catalog_{field}.csv"
+def flux_method_dir(method: str, dig_mode: str = "no_dig") -> Path:
+    return flux_catalog_dir() / method / dig_mode
 
 
-def total_flux_catalog_csv() -> Path:
-    return flux_catalog_dir() / "total_flux_catalog.csv"
+def flux_catalog_csv(field: str, method: str = "summed_map", dig_mode: str = "no_dig") -> Path:
+    return flux_method_dir(method, dig_mode=dig_mode) / f"flux_catalog_{field}.csv"
 
 
-def derived_catalog_csv(stage: str) -> Path:
-    return flux_catalog_dir() / f"total_flux_catalog_{stage}.csv"
+def total_flux_catalog_csv(method: str = "summed_map", dig_mode: str = "no_dig") -> Path:
+    return flux_method_dir(method, dig_mode=dig_mode) / "total_flux_catalog.csv"
+
+
+def derived_catalog_dir(method: str = "summed_map", dig_mode: str = "no_dig") -> Path:
+    return flux_method_dir(method, dig_mode=dig_mode) / "derived"
+
+
+def derived_catalog_csv(stage: str, method: str = "summed_map", dig_mode: str = "no_dig") -> Path:
+    return derived_catalog_dir(method, dig_mode=dig_mode) / f"total_flux_catalog_{stage}.csv"
+
+
+def combined_catalog_csv(method: str = "summed_map", dig_mode: str = "no_dig") -> Path:
+    return flux_method_dir(method, dig_mode=dig_mode) / "total_flux_catalog_combined.csv"
