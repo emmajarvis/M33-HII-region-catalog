@@ -19,6 +19,20 @@ class PhotometryConfig:
     clip_negative_after_bg: bool = False
     dig_clip_sigma: float = 3.0
     dig_clip_iterations: int = 2
+    dig_background_percentile: float = 2.0
+    dig_line_ratio_to_halpha: dict[str, float] = field(
+        default_factory=lambda: {
+            "Halpha": 1.0,
+            "Hbeta": 1.0 / 3.1,
+            "[OIII]4959": 0.03,
+            "[OIII]5007": 0.09,
+            "[NII]6548": 0.07,
+            "[NII]6583": 0.21,
+            "[SII]6716": 0.12,
+            "[SII]6731": 0.09,
+            "[OII]3727": 0.25,
+        }
+    )
 
 
 @dataclass(frozen=True)
@@ -26,6 +40,9 @@ class DerivedConfig:
     catalog_dir: str = "CATALOGS/flux_catalogs"
     logu_n_mc: int = 2000
     density_n_mc: int = 200
+    electron_temperature_K: float = 1.0e4
+    ionized_gas_particle_factor: float = 2.0
+    m33_distance_mpc: float = 0.84
     metallicity_n_mc: int = 500
 
 

@@ -1,0 +1,14 @@
+All of this should just be coded, no rendering of plots or anything.
+
+Changes to make in analysis:
+
+1. Remove overlapping regions. In some fields, there are parts of the map that overlap which means there are duplicated regions. For the catalog, if two regions from neighbouring fields have peaks that are within 5 pixels lets say they are the same region). and then keep both in the catalog but add a flag called "duplicated" and put True if the region is in more than one field. Then add another flag called "primary" which chooses the primary region (if the region is not duplicated, set this to true and if it is duplicated, choose the one with higher Ha signal-to-noise and call this true). Then in the rest of the analysis for all paper plots set primary=True. In the catalog_numbers.tex file, just add a parameter for the number of regions before duplicate removal, number of regions that are duplicated in the catalog, and then the final nregions should be after duplicate removal (and all other numbers should be after duplicate removal, except for numbers that have to do with peak/boundary removal stages). So the duplicate removal should be after all the region/boundary/catalog generation but before making plots for the paper.
+2. Add some quantities for the region boundary testing section. Add values in a .tex file to compare. Put average, spread, and slope of sizes and luminosities for each boundary method. Also only do this analysis on the subset of regions that are star forming and have SNR>3 in the bpt lines. Also, do this for both dig corrected and not dig corrected values.
+3. calculate the total contribution due to hii regions to the halpha luminosity of the galaxy compared with outside the boundaries and outside the zoi for dig corrected hii regions and extinction corrected map as well, and calculate these values for each of the boundary testing methods as well.
+
+Changes to make in plots :
+
+4. Luminosity function plot: show the luminosity function with slope for the raw observed values, then extinction corrected values, then dig + extinction  corrected (this final one is what is currently being plotted, keep it in the colour it currently is). Put all of the on one panel, make the raw one grey, the extinction corrected black and then the final one, the colour of L in the colour dictionary and plot this one on top. Overplot the slope for each one.
+6. Make a plot with 2 columns and 5 rows. each row is one of the metallicitity indicators and in the left column, plot these against logU and in the right column plot these against log(Pressure/K). Use same colours as previous metallicity gradient plot.
+8. In the extinction mosaic map, remove the outer 50 pixels from each field for the mosaic.
+10. Add a plot of luminosity vs electron density.

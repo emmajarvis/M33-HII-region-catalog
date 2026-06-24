@@ -21,6 +21,8 @@ from .io import read_catalog, write_catalog
 
 
 C_CM_S = c.c.to_value(u.cm / u.s)
+KK04_LOGQ_RANGE = (6.5, 8.5)
+KK04_METALLICITY_RANGE = (7.1, 9.4)
 
 
 def merge_field_flux_catalogs(catalog_dir: Path | None = None, method: str = "summed_map", dig_mode: str = "no_dig") -> pd.DataFrame:
@@ -74,14 +76,76 @@ def kk04_logq_from_logO32_and_Z(logO32, Z_12logOH):
     return num / den
 
 
+def kk04_metallicity_from_logR23_and_logq(logR23, logq, branch):
+    """Return the KK04 R23 metallicity for the selected upper/lower branch."""
+    x = np.asarray(logR23, dtype=float)
+    q = np.asarray(logq, dtype=float)
+    branch = np.asarray(branch)
+    lower = 9.40 + 4.65 * x - 3.17 * x**2 - q * (0.272 + 0.547 * x - 0.513 * x**2)
+    upper = (
+        9.72
+        - 0.777 * x
+        - 0.951 * x**2
+        - 0.072 * x**3
+        - 0.811 * x**4
+        - q * (0.0737 - 0.0713 * x - 0.141 * x**2 + 0.0373 * x**3 - 0.058 * x**4)
+    )
+    return np.where(branch == "lower", lower, upper)
+
+
+def kk04_iterative_logq_and_metallicity(
+    logO32,
+    logR23,
+    branch,
+    convergence_tolerance: float = 1.0e-3,
+    max_iterations: int = 20,
+):
+    """Jointly solve KK04 ionization parameter and R23 metallicity."""
+    logO32, logR23, branch = np.broadcast_arrays(
+        np.asarray(logO32, dtype=float),
+        np.asarray(logR23, dtype=float),
+        np.asarray(branch),
+    )
+    valid = np.isfinite(logO32) & np.isfinite(logR23) & np.isin(branch, ("lower", "upper"))
+    metallicity = np.where(branch == "lower", 8.2, 8.7).astype(float)
+    metallicity[~valid] = np.nan
+    iterations = np.zeros(metallicity.shape, dtype=int)
+    converged = np.zeros(metallicity.shape, dtype=bool)
+
+    for iteration in range(1, max_iterations + 1):
+        logq = kk04_logq_from_logO32_and_Z(logO32, metallicity)
+        updated = kk04_metallicity_from_logR23_and_logq(logR23, logq, branch)
+        finite = valid & np.isfinite(logq) & np.isfinite(updated)
+        newly_converged = finite & ~converged & (np.abs(updated - metallicity) <= convergence_tolerance)
+        iterations[newly_converged] = iteration
+        converged |= newly_converged
+        metallicity = np.where(finite, updated, np.nan)
+        if np.all(converged | ~valid):
+            break
+
+    logq = kk04_logq_from_logO32_and_Z(logO32, metallicity)
+    within_calibration_grid = (
+        np.isfinite(logq)
+        & np.isfinite(metallicity)
+        & (logq >= KK04_LOGQ_RANGE[0])
+        & (logq <= KK04_LOGQ_RANGE[1])
+        & (metallicity >= KK04_METALLICITY_RANGE[0])
+        & (metallicity <= KK04_METALLICITY_RANGE[1])
+    )
+    converged &= within_calibration_grid
+    iterations[valid & ~converged] = max_iterations
+    return logq, metallicity, converged, iterations
+
+
 def add_logU_KK04(
     df: pd.DataFrame,
     n_mc: int = 2000,
     seed: int = 123,
-    metallicity_cal: str = "M13_O3N2",
-    Z_intrinsic_sigma_dex: float = 0.18,
-    apply_Z_intrinsic_scatter: bool = True,
+    branch_logN2O2_threshold: float = -1.2,
+    convergence_tolerance: float = 1.0e-3,
+    max_iterations: int = 20,
 ) -> pd.DataFrame:
+    """Add self-consistent KK04 R23/O32 metallicity and ionization parameter."""
     out = df.copy()
     prefix = "F"
     oii, oii_e = _col(prefix, "[OII]3727", "sum_dered")
@@ -92,38 +156,48 @@ def add_logU_KK04(
 
     if n_mc <= 1:
         with np.errstate(divide="ignore", invalid="ignore"):
-            O32 = ((1.0 + 1.0 / 2.98) * out[o3_5007].to_numpy(dtype=float)) / out[oii].to_numpy(dtype=float)
+            total_oiii = (1.0 + 1.0 / 2.98) * out[o3_5007].to_numpy(dtype=float)
+            O32 = total_oiii / out[oii].to_numpy(dtype=float)
+            R23 = (out[oii].to_numpy(dtype=float) + total_oiii) / out[hb].to_numpy(dtype=float)
             logO32 = np.log10(O32)
+            logR23 = np.log10(R23)
+            logN2O2 = np.log10(out[nii].to_numpy(dtype=float) / out[oii].to_numpy(dtype=float))
             O3N2 = np.log10(
                 (out[o3_5007].to_numpy(dtype=float) / out[hb].to_numpy(dtype=float))
                 * (out[ha].to_numpy(dtype=float) / out[nii].to_numpy(dtype=float))
             )
-        if metallicity_cal == "M13_O3N2":
-            Z = 8.533 - 0.214 * O3N2
-        elif metallicity_cal == "PP04_O3N2":
-            Z = 8.73 - 0.32 * O3N2
-        else:
-            raise ValueError("metallicity_cal must be 'M13_O3N2' or 'PP04_O3N2'.")
-        logq = kk04_logq_from_logO32_and_Z(logO32, Z)
+        branch = np.where(logN2O2 < branch_logN2O2_threshold, "lower", "upper")
+        logq, Z, converged, iterations = kk04_iterative_logq_and_metallicity(
+            logO32,
+            logR23,
+            branch,
+            convergence_tolerance=convergence_tolerance,
+            max_iterations=max_iterations,
+        )
         logU = logq - np.log10(C_CM_S)
         good = (
             np.isfinite(O32)
+            & np.isfinite(R23)
             & np.isfinite(logO32)
-            & np.isfinite(O3N2)
+            & np.isfinite(logR23)
+            & np.isfinite(logN2O2)
             & np.isfinite(Z)
             & np.isfinite(logq)
             & np.isfinite(logU)
+            & converged
             & (out[oii].to_numpy(dtype=float) > 0)
             & (out[o3_5007].to_numpy(dtype=float) > 0)
             & (out[hb].to_numpy(dtype=float) > 0)
-            & (out[ha].to_numpy(dtype=float) > 0)
             & (out[nii].to_numpy(dtype=float) > 0)
         )
         out["O32"] = np.where(good, O32, np.nan)
         out["O32_e"] = np.nan
         out["logO32"] = np.where(good, logO32, np.nan)
         out["logO32_e"] = np.nan
-        out["O3N2"] = np.where(good, O3N2, np.nan)
+        out["R23"] = np.where(good, R23, np.nan)
+        out["logR23"] = np.where(good, logR23, np.nan)
+        out["logN2O2"] = np.where(good, logN2O2, np.nan)
+        out["O3N2"] = np.where(good & np.isfinite(O3N2), O3N2, np.nan)
         out["O3N2_e"] = np.nan
         out["Z_12logOH"] = np.where(good, Z, np.nan)
         out["Z_12logOH_e"] = np.nan
@@ -132,8 +206,11 @@ def add_logU_KK04(
         out["logU_KK04"] = np.where(good, logU, np.nan)
         out["logU_KK04_e"] = np.nan
         out["logU_flag"] = np.where(np.isfinite(out["logU_KK04"]), "ok", "invalid")
-        out["logU_meta_cal"] = metallicity_cal
-        out["logU_meta_Zscatter_dex"] = Z_intrinsic_sigma_dex if apply_Z_intrinsic_scatter else 0.0
+        out["logU_KK04_branch"] = np.where(good, branch, "invalid")
+        out["logU_KK04_converged"] = converged
+        out["logU_KK04_iterations"] = iterations
+        out["logU_meta_cal"] = "KK04_iterative_R23_O32"
+        out["logU_meta_branch_threshold_logN2O2"] = branch_logN2O2_threshold
         return out
 
     rng = np.random.default_rng(seed)
@@ -141,6 +218,12 @@ def add_logU_KK04(
     O32_sig = np.full(len(out), np.nan)
     logO32_med = np.full(len(out), np.nan)
     logO32_sig = np.full(len(out), np.nan)
+    R23_med = np.full(len(out), np.nan)
+    R23_sig = np.full(len(out), np.nan)
+    logR23_med = np.full(len(out), np.nan)
+    logR23_sig = np.full(len(out), np.nan)
+    logN2O2_med = np.full(len(out), np.nan)
+    logN2O2_sig = np.full(len(out), np.nan)
     O3N2_med = np.full(len(out), np.nan)
     O3N2_sig = np.full(len(out), np.nan)
     Z_med = np.full(len(out), np.nan)
@@ -149,6 +232,9 @@ def add_logU_KK04(
     logq_sig = np.full(len(out), np.nan)
     logU_med = np.full(len(out), np.nan)
     logU_sig = np.full(len(out), np.nan)
+    branch_result = np.full(len(out), "invalid", dtype=object)
+    converged_fraction = np.full(len(out), np.nan)
+    iteration_med = np.full(len(out), np.nan)
 
     def med_sig(x):
         p16, p50, p84 = np.nanpercentile(x, [16, 50, 84])
@@ -170,49 +256,52 @@ def add_logU_KK04(
         d_ha = np.clip(safe_normal(rng, f_ha, e_ha, n_mc), 1e-30, None)
         d_nii = np.clip(safe_normal(rng, f_nii, e_nii, n_mc), 1e-30, None)
 
-        d_o32 = ((1 + 1 / 2.98) * d_5007) / d_oii
-        mask_o32 = np.isfinite(d_o32) & (d_o32 > 0)
-        if mask_o32.sum() < 50:
-            continue
-        d_o32 = d_o32[mask_o32]
+        d_total_oiii = (1 + 1 / 2.98) * d_5007
+        d_o32 = d_total_oiii / d_oii
+        d_r23 = (d_oii + d_total_oiii) / d_hb
         d_logO32 = np.log10(d_o32)
-
+        d_logR23 = np.log10(d_r23)
+        d_logN2O2 = np.log10(d_nii / d_oii)
         d_o3n2 = np.log10((d_5007 / d_hb) * (d_ha / d_nii))
-        mask_o3n2 = np.isfinite(d_o3n2)
-        if mask_o3n2.sum() < 50:
-            continue
-        d_o3n2 = d_o3n2[mask_o3n2]
-
-        if metallicity_cal == "M13_O3N2":
-            d_Z = 8.533 - 0.214 * d_o3n2
-        elif metallicity_cal == "PP04_O3N2":
-            d_Z = 8.73 - 0.32 * d_o3n2
-        else:
-            raise ValueError("metallicity_cal must be 'M13_O3N2' or 'PP04_O3N2'.")
-
-        if apply_Z_intrinsic_scatter and Z_intrinsic_sigma_dex and Z_intrinsic_sigma_dex > 0:
-            d_Z = d_Z + rng.normal(0.0, Z_intrinsic_sigma_dex, size=d_Z.size)
-
-        n = min(d_logO32.size, d_Z.size)
-        d_logq = kk04_logq_from_logO32_and_Z(d_logO32[:n], d_Z[:n])
+        d_branch = np.where(d_logN2O2 < branch_logN2O2_threshold, "lower", "upper")
+        d_logq, d_Z, d_converged, d_iterations = kk04_iterative_logq_and_metallicity(
+            d_logO32,
+            d_logR23,
+            d_branch,
+            convergence_tolerance=convergence_tolerance,
+            max_iterations=max_iterations,
+        )
         d_logU = d_logq - np.log10(C_CM_S)
-        mask_logu = np.isfinite(d_logq) & np.isfinite(d_logU)
+        mask_logu = d_converged & np.isfinite(d_logq) & np.isfinite(d_logU) & np.isfinite(d_Z)
         if mask_logu.sum() < 50:
             continue
         d_logq = d_logq[mask_logu]
         d_logU = d_logU[mask_logu]
+        d_Z = d_Z[mask_logu]
 
         O32_med[i], O32_sig[i] = med_sig(d_o32)
         logO32_med[i], logO32_sig[i] = med_sig(d_logO32)
+        R23_med[i], R23_sig[i] = med_sig(d_r23)
+        logR23_med[i], logR23_sig[i] = med_sig(d_logR23)
+        logN2O2_med[i], logN2O2_sig[i] = med_sig(d_logN2O2)
         O3N2_med[i], O3N2_sig[i] = med_sig(d_o3n2)
-        Z_med[i], Z_sig[i] = med_sig(d_Z[:n])
+        Z_med[i], Z_sig[i] = med_sig(d_Z)
         logq_med[i], logq_sig[i] = med_sig(d_logq)
         logU_med[i], logU_sig[i] = med_sig(d_logU)
+        branch_result[i] = "lower" if np.mean(d_branch[mask_logu] == "lower") >= 0.5 else "upper"
+        converged_fraction[i] = np.mean(d_converged)
+        iteration_med[i] = np.median(d_iterations[mask_logu])
 
     out["O32"] = O32_med
     out["O32_e"] = O32_sig
     out["logO32"] = logO32_med
     out["logO32_e"] = logO32_sig
+    out["R23"] = R23_med
+    out["R23_e"] = R23_sig
+    out["logR23"] = logR23_med
+    out["logR23_e"] = logR23_sig
+    out["logN2O2"] = logN2O2_med
+    out["logN2O2_e"] = logN2O2_sig
     out["O3N2"] = O3N2_med
     out["O3N2_e"] = O3N2_sig
     out["Z_12logOH"] = Z_med
@@ -222,8 +311,12 @@ def add_logU_KK04(
     out["logU_KK04"] = logU_med
     out["logU_KK04_e"] = logU_sig
     out["logU_flag"] = np.where(np.isfinite(out["logU_KK04"]), "ok", "invalid")
-    out["logU_meta_cal"] = metallicity_cal
-    out["logU_meta_Zscatter_dex"] = Z_intrinsic_sigma_dex if apply_Z_intrinsic_scatter else 0.0
+    out["logU_KK04_branch"] = branch_result
+    out["logU_KK04_converged"] = np.isfinite(logU_med)
+    out["logU_KK04_converged_fraction"] = converged_fraction
+    out["logU_KK04_iterations"] = iteration_med
+    out["logU_meta_cal"] = "KK04_iterative_R23_O32"
+    out["logU_meta_branch_threshold_logN2O2"] = branch_logN2O2_threshold
     return out
 
 
@@ -231,7 +324,10 @@ def add_electron_density(
     df: pd.DataFrame,
     te_default: float = 1.0e4,
     use_dereddened: bool = True,
-    n_mc: int = 200,
+    n_mc: int = 50,
+    min_mc_physical_fraction: float = 0.5,
+    min_line_snr: float = 10.0,
+    upper_limit_sigma: float = 1.0,
 ) -> pd.DataFrame:
     import pyneb as pn
 
@@ -250,47 +346,315 @@ def add_electron_density(
         c6716e = c_6716_Fe if c_6716_Fe in out.columns else None
         c6731e = c_6731_Fe if c_6731_Fe in out.columns else None
 
-    out["SII_ratio_6716_6731"] = out[c6716] / out[c6731]
+    f1 = pd.to_numeric(out[c6716], errors="coerce").to_numpy(dtype=float)
+    f2 = pd.to_numeric(out[c6731], errors="coerce").to_numpy(dtype=float)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        ratio = f1 / f2
+    out["SII_ratio_6716_6731"] = ratio
+
     if c6716e is not None and c6731e is not None:
-        ratio = out["SII_ratio_6716_6731"].to_numpy(dtype=float)
-        f1 = out[c6716].to_numpy(dtype=float)
-        f2 = out[c6731].to_numpy(dtype=float)
-        e1 = out[c6716e].to_numpy(dtype=float)
-        e2 = out[c6731e].to_numpy(dtype=float)
+        # Dereddened line errors contain the same E(B-V) uncertainty in both
+        # lines. Treating those terms as independent greatly overstates the
+        # uncertainty of this ratio because the lines are only 15 Angstrom
+        # apart. Use the raw flux fractional errors when they are available.
+        error_f1_col, error_f2_col = c6716, c6731
+        error_e1_col, error_e2_col = c6716e, c6731e
+        if use_dereddened and all(col in out.columns for col in (c_6716_F, c_6731_F, c_6716_Fe, c_6731_Fe)):
+            error_f1_col, error_f2_col = c_6716_F, c_6731_F
+            error_e1_col, error_e2_col = c_6716_Fe, c_6731_Fe
+        error_f1 = pd.to_numeric(out[error_f1_col], errors="coerce").to_numpy(dtype=float)
+        error_f2 = pd.to_numeric(out[error_f2_col], errors="coerce").to_numpy(dtype=float)
+        e1 = pd.to_numeric(out[error_e1_col], errors="coerce").to_numpy(dtype=float)
+        e2 = pd.to_numeric(out[error_e2_col], errors="coerce").to_numpy(dtype=float)
         with np.errstate(divide="ignore", invalid="ignore"):
-            out["SII_ratio_6716_6731_e"] = np.abs(ratio) * np.sqrt((e1 / f1) ** 2 + (e2 / f2) ** 2)
+            out["SII_ratio_6716_6731_e"] = np.abs(ratio) * np.sqrt((e1 / error_f1) ** 2 + (e2 / error_f2) ** 2)
 
     atom = pn.Atom("S", 2)
-    valid = np.isfinite(out["SII_ratio_6716_6731"]) & (out[c6716] > 0) & (out[c6731] > 0)
+    density_floor_cm3 = 1.0
+    density_ceiling_cm3 = 1.0e6
+    low_density_ratio_limit = float(
+        atom.getEmissivity(te_default, density_floor_cm3, wave=6716)
+        / atom.getEmissivity(te_default, density_floor_cm3, wave=6731)
+    )
+    high_density_ratio_limit = float(
+        atom.getEmissivity(te_default, density_ceiling_cm3, wave=6716)
+        / atom.getEmissivity(te_default, density_ceiling_cm3, wave=6731)
+    )
+    positive_flux = np.isfinite(f1) & np.isfinite(f2) & (f1 > 0) & (f2 > 0)
+    physical_ratio = (ratio > high_density_ratio_limit) & (ratio < low_density_ratio_limit)
+    valid = positive_flux & np.isfinite(ratio) & physical_ratio
     ne = np.full(len(out), np.nan, dtype=float)
-    ne[valid.to_numpy()] = atom.getTemDen(out.loc[valid, "SII_ratio_6716_6731"].to_numpy(dtype=float), tem=te_default, wave1=6716, wave2=6731)
+    ne[valid] = atom.getTemDen(ratio[valid], tem=te_default, wave1=6716, wave2=6731)
+    ne[~np.isfinite(ne) | (ne < density_floor_cm3) | (ne > density_ceiling_cm3)] = np.nan
     out["ne_SII_cm3"] = ne
 
-    def monte_carlo_ne_from_ratio(r, rerr, seed=0):
+    flags = np.full(len(out), "ok", dtype=object)
+    flags[~positive_flux | ~np.isfinite(ratio)] = "invalid_flux_or_ratio"
+    flags[positive_flux & np.isfinite(ratio) & (ratio >= low_density_ratio_limit)] = "low_density_limit"
+    flags[positive_flux & np.isfinite(ratio) & (ratio <= high_density_ratio_limit)] = "high_density_limit"
+    flags[valid & ~np.isfinite(ne)] = "solver_invalid"
+    out["ne_SII_flag"] = flags
+    out["ne_SII_ratio_low_density_limit"] = low_density_ratio_limit
+    out["ne_SII_ratio_high_density_limit"] = high_density_ratio_limit
+
+    ratio_error = np.asarray(
+        pd.to_numeric(out.get("SII_ratio_6716_6731_e", np.nan), errors="coerce"),
+        dtype=float,
+    )
+    ratio_well_constrained = (
+        (flags == "ok")
+        & np.isfinite(ratio_error)
+        & ((ratio + ratio_error) < low_density_ratio_limit)
+        & ((ratio - ratio_error) > high_density_ratio_limit)
+    )
+    out["ne_SII_ratio_well_constrained"] = ratio_well_constrained
+    reliable = flags == "ok"
+    snr_columns = ("SNR_[SII]6716_sum", "SNR_[SII]6731_sum")
+    if all(col in out.columns for col in snr_columns):
+        snr_6716 = pd.to_numeric(out[snr_columns[0]], errors="coerce").to_numpy(dtype=float)
+        snr_6731 = pd.to_numeric(out[snr_columns[1]], errors="coerce").to_numpy(dtype=float)
+        min_snr = np.minimum(snr_6716, snr_6731)
+        out["ne_SII_min_line_snr"] = min_snr
+        reliable &= np.isfinite(min_snr) & (min_snr >= min_line_snr)
+    out["ne_SII_reliable"] = reliable
+
+    # On the low-density side, a larger ratio means a lower density. For
+    # measurements consistent with the low-density limit, convert the lower
+    # one-sided ratio bound into an upper density limit.
+    ratio_lower_bound = ratio - upper_limit_sigma * ratio_error
+    low_density_side_unreliable = (
+        positive_flux
+        & np.isfinite(ratio)
+        & np.isfinite(ratio_error)
+        & (ratio_error > 0)
+        & ((ratio + upper_limit_sigma * ratio_error) >= low_density_ratio_limit)
+    )
+    upper_limit_constrained = (
+        low_density_side_unreliable
+        & (ratio_lower_bound > high_density_ratio_limit)
+        & (ratio_lower_bound < low_density_ratio_limit)
+    )
+    density_upper_limit = np.full(len(out), np.nan, dtype=float)
+    density_upper_limit[upper_limit_constrained] = atom.getTemDen(
+        ratio_lower_bound[upper_limit_constrained],
+        tem=te_default,
+        wave1=6716,
+        wave2=6731,
+    )
+    density_upper_limit[
+        ~np.isfinite(density_upper_limit)
+        | (density_upper_limit < density_floor_cm3)
+        | (density_upper_limit > density_ceiling_cm3)
+    ] = np.nan
+    out["ne_SII_cm3_upper_limit"] = density_upper_limit
+    out["ne_SII_upper_limit_sigma"] = upper_limit_sigma
+    out["ne_SII_is_upper_limit"] = np.isfinite(density_upper_limit)
+
+    def monte_carlo_ne_from_ratio(r, rerr, central_is_valid, seed=0):
+        if n_mc <= 0 or not central_is_valid:
+            return np.nan, np.nan, np.nan, np.nan
         rng = np.random.default_rng(seed)
         draws = rng.normal(loc=r, scale=rerr, size=n_mc)
-        draws = draws[np.isfinite(draws) & (draws > 0)]
-        if draws.size == 0:
-            return np.nan, np.nan, np.nan
-        ne_draws = atom.getTemDen(draws, tem=te_default, wave1=6716, wave2=6731)
+        physical_draws = draws[
+            np.isfinite(draws)
+            & (draws > high_density_ratio_limit)
+            & (draws < low_density_ratio_limit)
+        ]
+        physical_fraction = physical_draws.size / n_mc
+        if physical_draws.size == 0 or physical_fraction < min_mc_physical_fraction:
+            return np.nan, np.nan, np.nan, physical_fraction
+        ne_draws = atom.getTemDen(physical_draws, tem=te_default, wave1=6716, wave2=6731)
         ne_draws = np.atleast_1d(ne_draws)
-        ne_draws = ne_draws[np.isfinite(ne_draws) & (ne_draws > 0)]
+        ne_draws = ne_draws[
+            np.isfinite(ne_draws)
+            & (ne_draws >= density_floor_cm3)
+            & (ne_draws <= density_ceiling_cm3)
+        ]
         if ne_draws.size == 0:
-            return np.nan, np.nan, np.nan
+            return np.nan, np.nan, np.nan, physical_fraction
         p16, p50, p84 = np.percentile(ne_draws, [16, 50, 84])
-        return p50, p50 - p16, p84 - p50
+        return p50, p50 - p16, p84 - p50, physical_fraction
 
     if "SII_ratio_6716_6731_e" in out.columns:
         mc = np.array(
             [
-                monte_carlo_ne_from_ratio(r, e, seed=i) if np.isfinite(r) and np.isfinite(e) and e > 0 else (np.nan, np.nan, np.nan)
-                for i, (r, e) in enumerate(zip(out["SII_ratio_6716_6731"], out["SII_ratio_6716_6731_e"]))
+                monte_carlo_ne_from_ratio(r, e, flags[i] == "ok", seed=i)
+                if np.isfinite(r) and np.isfinite(e) and e > 0
+                else (np.nan, np.nan, np.nan, np.nan)
+                for i, (r, e) in enumerate(zip(ratio, out["SII_ratio_6716_6731_e"]))
             ],
             dtype=float,
         )
         out["ne_SII_cm3_mc"] = mc[:, 0]
         out["ne_SII_cm3_mc_minus"] = mc[:, 1]
         out["ne_SII_cm3_mc_plus"] = mc[:, 2]
+        out["ne_SII_mc_physical_fraction"] = mc[:, 3]
+    return out
+
+def add_thermal_pressure(
+    df: pd.DataFrame,
+    n_e: str | np.ndarray | pd.Series | float = "ne_SII_cm3",
+    T_e: str | np.ndarray | pd.Series | float = 1.0e4,
+    particle_factor: float = 2.0,
+) -> pd.DataFrame:
+    """Add ionized-gas pressure estimates based on the [S II] density.
+
+    ``P_e / k_B = n_e T_e`` is the electron pressure. ``P_thermal / k_B =
+    particle_factor n_e T_e`` approximates the total thermal pressure; the
+    default particle factor of two assumes fully ionized hydrogen.
+    """
+    out = df.copy()
+
+    def values(value, label: str) -> np.ndarray:
+        if isinstance(value, str):
+            if value not in out.columns:
+                raise ValueError(f"Missing {label} column: {value}")
+            return pd.to_numeric(out[value], errors="coerce").to_numpy(dtype=float)
+        array = np.asarray(value, dtype=float)
+        if array.ndim == 0:
+            return np.full(len(out), float(array), dtype=float)
+        if len(array) != len(out):
+            raise ValueError(f"{label} must be scalar or have one value per catalog row.")
+        return array
+
+    ne = values(n_e, "electron density")
+    te = values(T_e, "electron temperature")
+    valid = np.isfinite(ne) & (ne > 0) & np.isfinite(te) & (te > 0)
+    electron_pressure_over_k = np.where(valid, ne * te, np.nan)
+    thermal_pressure_over_k = particle_factor * electron_pressure_over_k
+    k_b_cgs = c.k_B.to_value(u.erg / u.K)
+
+    out["P_e_SII_over_k_K_cm3"] = electron_pressure_over_k
+    out["P_thermal_SII_over_k_K_cm3"] = thermal_pressure_over_k
+    out["P_thermal_SII_dyn_cm2"] = thermal_pressure_over_k * k_b_cgs
+    with np.errstate(divide="ignore", invalid="ignore"):
+        out["log_P_thermal_SII_over_k"] = np.log10(thermal_pressure_over_k)
+    out["P_thermal_SII_Te_K"] = te
+    out["P_thermal_SII_particle_factor"] = particle_factor
+
+    # Preserve the partially implemented legacy name as an electron-pressure
+    # alias, while using explicit names for all new analysis.
+    out["P_SII_K_cm3"] = electron_pressure_over_k
+
+    density_scale_columns = {
+        "ne_SII_cm3_mc": "P_thermal_SII_over_k_K_cm3_mc",
+        "ne_SII_cm3_mc_minus": "P_thermal_SII_over_k_K_cm3_mc_minus",
+        "ne_SII_cm3_mc_plus": "P_thermal_SII_over_k_K_cm3_mc_plus",
+        "ne_SII_cm3_upper_limit": "P_thermal_SII_over_k_K_cm3_upper_limit",
+    }
+    scale = particle_factor * te
+    for density_col, pressure_col in density_scale_columns.items():
+        if density_col in out.columns:
+            density_values = pd.to_numeric(out[density_col], errors="coerce").to_numpy(dtype=float)
+            out[pressure_col] = density_values * scale
+
+    pressure_upper_limit_col = "P_thermal_SII_over_k_K_cm3_upper_limit"
+    if pressure_upper_limit_col in out.columns:
+        pressure_upper_limit = pd.to_numeric(out[pressure_upper_limit_col], errors="coerce").to_numpy(dtype=float)
+        out["P_thermal_SII_dyn_cm2_upper_limit"] = pressure_upper_limit * k_b_cgs
+        with np.errstate(divide="ignore", invalid="ignore"):
+            out["log_P_thermal_SII_over_k_upper_limit"] = np.log10(pressure_upper_limit)
+
+    if "ne_SII_reliable" in out.columns:
+        out["P_thermal_SII_reliable"] = out["ne_SII_reliable"].fillna(False).astype(bool)
+    if "ne_SII_is_upper_limit" in out.columns:
+        out["P_thermal_SII_is_upper_limit"] = out["ne_SII_is_upper_limit"].fillna(False).astype(bool)
+    if "ne_SII_flag" in out.columns:
+        out["P_thermal_SII_flag"] = out["ne_SII_flag"]
+    return out
+
+
+def add_peak_region_properties(
+    df: pd.DataFrame,
+    distance_mpc: float = 0.84,
+    ebv_col: str = "sum_E_BV",
+    ebv_error_col: str = "sum_E_BV_err",
+    te_default: float = 1.0e4,
+    n_mc: int = 50,
+) -> pd.DataFrame:
+    """Add peak-pixel H-alpha luminosity and [S II] electron density."""
+    out = df.copy()
+    required_peak_columns = [
+        "F_Halpha_peak",
+        "F_Halpha_e_peak",
+        "F_[SII]6716_peak",
+        "F_[SII]6716_e_peak",
+        "F_[SII]6731_peak",
+        "F_[SII]6731_e_peak",
+    ]
+    missing = [col for col in required_peak_columns if col not in out.columns]
+    if missing:
+        raise ValueError(f"Missing peak-pixel flux columns: {', '.join(missing)}")
+
+    ha = pd.to_numeric(out["F_Halpha_peak"], errors="coerce").to_numpy(dtype=float)
+    ha_error = pd.to_numeric(out["F_Halpha_e_peak"], errors="coerce").to_numpy(dtype=float)
+    ebv = (
+        pd.to_numeric(out[ebv_col], errors="coerce").to_numpy(dtype=float)
+        if ebv_col in out.columns
+        else np.zeros(len(out), dtype=float)
+    )
+    ebv_error = (
+        pd.to_numeric(out[ebv_error_col], errors="coerce").to_numpy(dtype=float)
+        if ebv_error_col in out.columns
+        else np.zeros(len(out), dtype=float)
+    )
+    k_halpha = 2.535
+    extinction_factor = 10.0 ** (0.4 * ebv * k_halpha)
+    ha_dered = ha * extinction_factor
+    derivative_ebv = ha_dered * (0.4 * np.log(10.0) * k_halpha)
+    ha_dered_error = np.sqrt((extinction_factor * ha_error) ** 2 + (derivative_ebv * ebv_error) ** 2)
+    distance_cm = (float(distance_mpc) * u.Mpc).to_value(u.cm)
+    luminosity_factor = 4.0 * np.pi * distance_cm**2
+
+    out["F_Halpha_peak_dered"] = ha_dered
+    out["F_Halpha_e_peak_dered"] = ha_dered_error
+    out["L_Ha_peak"] = luminosity_factor * ha
+    out["L_Ha_peak_dered"] = luminosity_factor * ha_dered
+    out["L_Ha_e_peak_dered"] = luminosity_factor * ha_dered_error
+    with np.errstate(divide="ignore", invalid="ignore"):
+        out["log_L_Ha_peak"] = np.log10(out["L_Ha_peak"])
+        out["log_L_Ha_peak_dered"] = np.log10(out["L_Ha_peak_dered"])
+    out["L_Ha_peak_distance_mpc"] = float(distance_mpc)
+
+    peak_density_input = pd.DataFrame(
+        {
+            "F_[SII]6716_sum": pd.to_numeric(out["F_[SII]6716_peak"], errors="coerce"),
+            "F_[SII]6716_e_sum": pd.to_numeric(out["F_[SII]6716_e_peak"], errors="coerce"),
+            "F_[SII]6731_sum": pd.to_numeric(out["F_[SII]6731_peak"], errors="coerce"),
+            "F_[SII]6731_e_sum": pd.to_numeric(out["F_[SII]6731_e_peak"], errors="coerce"),
+        }
+    )
+    for line_name in ("[SII]6716", "[SII]6731"):
+        peak_snr_col = f"SNR_{line_name}_peak"
+        if peak_snr_col in out.columns:
+            peak_density_input[f"SNR_{line_name}_sum"] = pd.to_numeric(out[peak_snr_col], errors="coerce")
+    peak_density = add_electron_density(
+        peak_density_input,
+        te_default=te_default,
+        use_dereddened=False,
+        n_mc=n_mc,
+    )
+    peak_density_names = {
+        "SII_ratio_6716_6731": "SII_ratio_6716_6731_peak",
+        "SII_ratio_6716_6731_e": "SII_ratio_6716_6731_e_peak",
+        "ne_SII_cm3": "ne_SII_peak_cm3",
+        "ne_SII_flag": "ne_SII_peak_flag",
+        "ne_SII_ratio_low_density_limit": "ne_SII_peak_ratio_low_density_limit",
+        "ne_SII_ratio_high_density_limit": "ne_SII_peak_ratio_high_density_limit",
+        "ne_SII_ratio_well_constrained": "ne_SII_peak_ratio_well_constrained",
+        "ne_SII_min_line_snr": "ne_SII_peak_min_line_snr",
+        "ne_SII_reliable": "ne_SII_peak_reliable",
+        "ne_SII_cm3_upper_limit": "ne_SII_peak_cm3_upper_limit",
+        "ne_SII_upper_limit_sigma": "ne_SII_peak_upper_limit_sigma",
+        "ne_SII_is_upper_limit": "ne_SII_peak_is_upper_limit",
+        "ne_SII_cm3_mc": "ne_SII_peak_cm3_mc",
+        "ne_SII_cm3_mc_minus": "ne_SII_peak_cm3_mc_minus",
+        "ne_SII_cm3_mc_plus": "ne_SII_peak_cm3_mc_plus",
+        "ne_SII_mc_physical_fraction": "ne_SII_peak_mc_physical_fraction",
+    }
+    for source_col, output_col in peak_density_names.items():
+        if source_col in peak_density.columns:
+            out[output_col] = peak_density[source_col].to_numpy()
     return out
 
 
@@ -315,12 +679,30 @@ def add_primary_overlap_flags(
     ra_col: str = "RA_deg",
     dec_col: str = "Dec_deg",
     match_radius_arcsec: float = 1.0,
+    match_radius_px: float | None = None,
+    pixel_scale_arcsec: float = 0.32,
+    field_col: str = "field",
     snr_cols: list[str] | None = None,
+    boundary_overlap: bool = False,
+    boundary_max_zoi_pc: int = 100,
+    boundary_label_col: str = "zoi_center_label",
+    boundary_min_overlap_pixels: int = 1,
+    boundary_grid_arcsec: float | None = None,
+    boundary_valid_bounds: tuple[int, int, int, int] | None = (50, 2000, 50, 2000),
 ) -> pd.DataFrame:
+    """Flag duplicate regions in overlapping fields and keep the highest-S/N row.
+
+    Duplicate groups are normally seeded by nearly coincident peak coordinates.
+    When ``boundary_overlap`` is true, regions are also grouped if their boundary
+    footprints share any sky-pixel samples across different fields.
+    """
     out = df.copy()
     out["duplicate_group_id"] = pd.Series([pd.NA] * len(out), dtype="object")
     out["duplicate_group_size"] = 1
     out["is_duplicate_overlap"] = False
+    out["duplicate_peak_overlap"] = False
+    out["duplicate_boundary_overlap"] = False
+    out["duplicated"] = False
     out["primary"] = True
     out["primary_rank"] = 1
     out["primary_region_id"] = out["region_id"] if "region_id" in out.columns else pd.Series([pd.NA] * len(out), dtype="object")
@@ -340,23 +722,54 @@ def add_primary_overlap_flags(
     if not snr_cols:
         raise ValueError("No SNR columns found for primary overlap selection.")
 
+    pair_reasons: dict[tuple[int, int], set[str]] = {}
+
     ra = pd.to_numeric(out[ra_col], errors="coerce").to_numpy(dtype=float)
     dec = pd.to_numeric(out[dec_col], errors="coerce").to_numpy(dtype=float)
     valid = np.isfinite(ra) & np.isfinite(dec)
-    if valid.sum() == 0:
+    if valid.sum() > 0:
+        # Small-angle approximation in arcsec for local duplicate grouping.
+        # When a pixel radius is requested, convert it to an on-sky radius
+        # instead of comparing local field x/y pixels, which are not on a common
+        # mosaic grid.
+        x_arcsec = ra[valid] * np.cos(np.deg2rad(dec[valid])) * 3600.0
+        y_arcsec = dec[valid] * 3600.0
+        coords = np.column_stack([x_arcsec, y_arcsec])
+        match_radius = (
+            float(match_radius_px) * float(pixel_scale_arcsec)
+            if match_radius_px is not None
+            else float(match_radius_arcsec)
+        )
+        tree = cKDTree(coords)
+        valid_idx = np.flatnonzero(valid)
+        peak_pairs = tree.query_pairs(r=match_radius)
+        if field_col in out.columns:
+            fields = out[field_col].astype(str).to_numpy()
+            peak_pairs = {
+                (i, j) for i, j in peak_pairs
+                if fields[valid_idx[i]] != fields[valid_idx[j]]
+            }
+        for i, j in peak_pairs:
+            pair = tuple(sorted((int(valid_idx[i]), int(valid_idx[j]))))
+            pair_reasons.setdefault(pair, set()).add("peak")
+
+    if boundary_overlap:
+        boundary_pairs = _find_boundary_overlap_pairs(
+            out,
+            field_col=field_col,
+            boundary_max_zoi_pc=boundary_max_zoi_pc,
+            boundary_label_col=boundary_label_col,
+            boundary_min_overlap_pixels=boundary_min_overlap_pixels,
+            boundary_grid_arcsec=boundary_grid_arcsec or pixel_scale_arcsec,
+            boundary_valid_bounds=boundary_valid_bounds,
+        )
+        for pair in boundary_pairs:
+            pair_reasons.setdefault(tuple(sorted(pair)), set()).add("boundary")
+
+    if not pair_reasons:
         return out
 
-    # Small-angle approximation in arcsec for local duplicate grouping.
-    x_arcsec = ra[valid] * np.cos(np.deg2rad(dec[valid])) * 3600.0
-    y_arcsec = dec[valid] * 3600.0
-    coords = np.column_stack([x_arcsec, y_arcsec])
-    tree = cKDTree(coords)
-    pairs = tree.query_pairs(r=float(match_radius_arcsec))
-    if not pairs:
-        return out
-
-    valid_idx = np.flatnonzero(valid)
-    parent = np.arange(len(valid_idx), dtype=int)
+    parent = np.arange(len(out), dtype=int)
 
     def find(i: int) -> int:
         while parent[i] != i:
@@ -369,18 +782,25 @@ def add_primary_overlap_flags(
         if ri != rj:
             parent[rj] = ri
 
-    for i, j in pairs:
+    for i, j in pair_reasons:
         union(i, j)
 
     groups: dict[int, list[int]] = {}
-    for i in range(len(valid_idx)):
-        groups.setdefault(find(i), []).append(i)
+    pair_rows = sorted({idx for pair in pair_reasons for idx in pair})
+    for row_idx in pair_rows:
+        groups.setdefault(find(row_idx), []).append(row_idx)
 
     dup_groups = [members for members in groups.values() if len(members) > 1]
     if not dup_groups:
         return out
 
     snr_frame = out[snr_cols].apply(pd.to_numeric, errors="coerce")
+    halpha_snr_col = next((col for col in ["SNR_Halpha_sum", "SNR_Halpha_int"] if col in out.columns), None)
+    halpha_snr = (
+        pd.to_numeric(out[halpha_snr_col], errors="coerce").to_numpy(dtype=float)
+        if halpha_snr_col is not None
+        else np.full(len(out), np.nan, dtype=float)
+    )
     score_sum = snr_frame.sum(axis=1, min_count=1).to_numpy(dtype=float)
     score_min = snr_frame.min(axis=1, skipna=True).to_numpy(dtype=float)
     score_median = snr_frame.median(axis=1, skipna=True).to_numpy(dtype=float)
@@ -391,15 +811,27 @@ def add_primary_overlap_flags(
     out["duplicate_score_finite_nlines"] = score_count
 
     for group_num, members in enumerate(dup_groups, start=1):
-        rows = valid_idx[np.asarray(members, dtype=int)]
+        rows = np.asarray(members, dtype=int)
+        row_set = set(rows)
         group_id = f"dup_{group_num:04d}"
         out.loc[rows, "duplicate_group_id"] = group_id
         out.loc[rows, "duplicate_group_size"] = int(len(rows))
         out.loc[rows, "is_duplicate_overlap"] = True
+        out.loc[rows, "duplicated"] = True
         out.loc[rows, "primary"] = False
+        group_pair_reasons = [
+            reasons
+            for (i, j), reasons in pair_reasons.items()
+            if i in row_set and j in row_set
+        ]
+        if any("peak" in reasons for reasons in group_pair_reasons):
+            out.loc[rows, "duplicate_peak_overlap"] = True
+        if any("boundary" in reasons for reasons in group_pair_reasons):
+            out.loc[rows, "duplicate_boundary_overlap"] = True
 
         def score_tuple(row_idx: int):
             return (
+                float(halpha_snr[row_idx]) if np.isfinite(halpha_snr[row_idx]) else -np.inf,
                 int(score_count[row_idx]),
                 float(score_min[row_idx]) if np.isfinite(score_min[row_idx]) else -np.inf,
                 float(score_median[row_idx]) if np.isfinite(score_median[row_idx]) else -np.inf,
@@ -415,6 +847,143 @@ def add_primary_overlap_flags(
             out.loc[row_idx, "primary_rank"] = rank
 
     return out
+
+
+def _field_wcs_candidates_for_overlap(field: str) -> list[Path]:
+    return [
+        paths.calibrated_field_map_dir(field) / f"M33{field}-Haflux.fits",
+        paths.field_map_dir(field) / f"M33{field}-Haflux.fits",
+        paths.field_map_dir(field) / f"M33-{field}_SN3.LineMaps.map.Ha+OIII.1x1.amplitude.fits",
+        paths.field_map_dir(field) / f"M33{field}-SN3Continuum.fits",
+        paths.repo_root().parent / "M33-Maps" / f"M33-{field}" / f"M33{field}-Haflux.fits",
+        paths.repo_root().parent / "M33-Maps-Calibrated" / f"M33-{field}" / f"M33{field}-Haflux.fits",
+    ]
+
+
+def _catalog_boundary_label(row: pd.Series, field: str, boundary_label_col: str) -> int | None:
+    if boundary_label_col in row.index and pd.notna(row[boundary_label_col]):
+        try:
+            return int(round(float(row[boundary_label_col])))
+        except (TypeError, ValueError):
+            pass
+    if "region_id" in row.index:
+        normalized = _normalize_region_id(field, row["region_id"])
+        if normalized is not None:
+            try:
+                return int(normalized.split("_")[-1])
+            except (TypeError, ValueError):
+                pass
+    for fallback in ("region_number", "label", "id"):
+        if fallback in row.index and pd.notna(row[fallback]):
+            try:
+                return int(round(float(row[fallback])))
+            except (TypeError, ValueError):
+                continue
+    return None
+
+
+def _find_boundary_overlap_pairs(
+    df: pd.DataFrame,
+    field_col: str = "field",
+    boundary_max_zoi_pc: int = 100,
+    boundary_label_col: str = "zoi_center_label",
+    boundary_min_overlap_pixels: int = 1,
+    boundary_grid_arcsec: float = 0.32,
+    boundary_valid_bounds: tuple[int, int, int, int] | None = (50, 2000, 50, 2000),
+) -> set[tuple[int, int]]:
+    """Return row-index pairs whose region footprints overlap on the sky."""
+    from astropy.io import fits
+    from astropy.wcs import WCS
+
+    if field_col not in df.columns:
+        return set()
+
+    sky_cell_owner: dict[tuple[int, int], tuple[int, str]] = {}
+    overlap_counts: dict[tuple[int, int], int] = {}
+    fields = df[field_col].dropna().astype(str).unique()
+    grid = float(boundary_grid_arcsec)
+    if not np.isfinite(grid) or grid <= 0:
+        grid = 0.32
+
+    for field in sorted(fields):
+        field_idx = df.index[df[field_col].astype(str) == field]
+        if len(field_idx) == 0:
+            continue
+
+        label_to_rows: dict[int, list[int]] = {}
+        for row_idx in field_idx:
+            label = _catalog_boundary_label(df.loc[row_idx], field, boundary_label_col)
+            if label is not None:
+                label_to_rows.setdefault(label, []).append(int(row_idx))
+        if not label_to_rows:
+            continue
+
+        boundary_path = paths.boundary_fits(field, boundary_max_zoi_pc)
+        wcs_path = next((p for p in _field_wcs_candidates_for_overlap(field) if p.exists()), None)
+        if not boundary_path.exists() or wcs_path is None:
+            continue
+
+        labels = np.asarray(fits.getdata(boundary_path))
+        finite_labels = np.isfinite(labels)
+        label_int = np.zeros(labels.shape, dtype=np.int64)
+        label_int[finite_labels] = np.rint(labels[finite_labels]).astype(np.int64)
+        valid = finite_labels & (label_int > 0)
+        if boundary_valid_bounds is not None:
+            x0, x1, y0, y1 = boundary_valid_bounds
+            bounds_mask = np.zeros(label_int.shape, dtype=bool)
+            bounds_mask[max(0, y0):min(label_int.shape[0], y1), max(0, x0):min(label_int.shape[1], x1)] = True
+            valid &= bounds_mask
+        present_labels = np.array([label for label in label_to_rows if label > 0], dtype=np.int64)
+        if present_labels.size == 0:
+            continue
+        valid &= np.isin(label_int, present_labels)
+        if not np.any(valid):
+            continue
+
+        wcs = WCS(fits.getheader(wcs_path))
+        y_pix_all, x_pix_all = np.nonzero(valid)
+        chunk_size = 250_000
+        for start in range(0, len(x_pix_all), chunk_size):
+            stop = start + chunk_size
+            x_pix = x_pix_all[start:stop]
+            y_pix = y_pix_all[start:stop]
+            pix_labels = label_int[y_pix, x_pix]
+            sky = wcs.pixel_to_world(x_pix, y_pix)
+            ra_deg = np.asarray(sky.ra.deg, dtype=float)
+            dec_deg = np.asarray(sky.dec.deg, dtype=float)
+            ok = np.isfinite(ra_deg) & np.isfinite(dec_deg)
+            if not np.any(ok):
+                continue
+            ra_deg = ra_deg[ok]
+            dec_deg = dec_deg[ok]
+            pix_labels = pix_labels[ok]
+            x_key = np.rint(ra_deg * np.cos(np.deg2rad(dec_deg)) * 3600.0 / grid).astype(np.int64)
+            y_key = np.rint(dec_deg * 3600.0 / grid).astype(np.int64)
+
+            for label, x_cell, y_cell in zip(pix_labels, x_key, y_key):
+                rows = label_to_rows.get(int(label))
+                if not rows:
+                    continue
+                row_idx = rows[0]
+                key = (int(x_cell), int(y_cell))
+                for dx in (-1, 0, 1):
+                    for dy in (-1, 0, 1):
+                        prior = sky_cell_owner.get((key[0] + dx, key[1] + dy))
+                        if prior is None:
+                            continue
+                        prior_idx, prior_field = prior
+                        if prior_field == field or prior_idx == row_idx:
+                            continue
+                        pair = tuple(sorted((int(prior_idx), int(row_idx))))
+                        overlap_counts[pair] = overlap_counts.get(pair, 0) + 1
+                        break
+                    else:
+                        continue
+                    break
+                sky_cell_owner.setdefault(key, (row_idx, field))
+
+    min_pixels = max(1, int(boundary_min_overlap_pixels))
+    return {pair for pair, count in overlap_counts.items() if count >= min_pixels}
 
 
 def _normalize_region_id(field: str, region_id) -> str | None:
@@ -561,7 +1130,7 @@ def poly_eval(coeffs, z):
     return np.polyval(coeffs[::-1], z)
 
 
-def invert_logR_to_Z(coeffs, logR_obs, z_min=6.5, z_max=9.5, ngrid=2000):
+def invert_logR_to_Z(coeffs, logR_obs, z_min=-2.5, z_max=0.8, ngrid=2000):
     if not np.isfinite(logR_obs):
         return np.nan
     zgrid = np.linspace(z_min, z_max, ngrid)
@@ -601,7 +1170,7 @@ def invert_logR_to_Z(coeffs, logR_obs, z_min=6.5, z_max=9.5, ngrid=2000):
         return np.nan
 
 
-def odr_refine_z(coeffs, logR_obs, z0, sx=1.0, sy=1.0):
+def odr_refine_z(coeffs, logR_obs, z0, sx=1.0, sy=1.0, z_min=-2.5, z_max=0.8):
     if not (np.isfinite(z0) and np.isfinite(logR_obs)):
         return np.nan
 
@@ -615,7 +1184,7 @@ def odr_refine_z(coeffs, logR_obs, z0, sx=1.0, sy=1.0):
     z_fit = out.beta[0]
     if not np.isfinite(z_fit):
         return np.nan
-    if z_fit < 6.5 or z_fit > 9.5:
+    if z_fit < z_min or z_fit > z_max:
         return np.nan
     return z_fit
 
@@ -642,7 +1211,7 @@ def build_calibrations():
     ]
 
 
-def compute_metallicities(full_catalog, z_min=6.5, z_max=9.5, use_odr=True, sx=1.0, sy=1.0):
+def compute_metallicities(full_catalog, z_min=-2.5, z_max=0.8, use_odr=True, sx=1.0, sy=1.0):
     ha = np.asarray(full_catalog["F_Halpha_sum_dered"], float)
     hb = np.asarray(full_catalog["F_Hbeta_sum_dered"], float)
     nii = np.asarray(full_catalog["F_[NII]6583_sum_dered"], float)
@@ -668,7 +1237,11 @@ def compute_metallicities(full_catalog, z_min=6.5, z_max=9.5, use_odr=True, sx=1
             if not np.isfinite(logR_i):
                 continue
             z0 = invert_logR_to_Z(cal.coeffs, logR_i, z_min=z_min, z_max=z_max)
-            Z[i] = odr_refine_z(cal.coeffs, logR_i, z0, sx=sx, sy=sy) if use_odr and np.isfinite(z0) else z0
+            Z[i] = (
+                odr_refine_z(cal.coeffs, logR_i, z0, sx=sx, sy=sy, z_min=z_min, z_max=z_max)
+                if use_odr and np.isfinite(z0)
+                else z0
+            )
         out[cal.name] = Z
     return out
 
@@ -725,7 +1298,7 @@ def add_metallicity_columns(df: pd.DataFrame, use_odr: bool = True) -> pd.DataFr
     return out
 
 
-def add_metallicity_error_columns(df: pd.DataFrame, n_mc: int = 500, seed: int = 123) -> pd.DataFrame:
+def add_metallicity_error_columns(df: pd.DataFrame, n_mc: int = 50, seed: int = 123) -> pd.DataFrame:
     out = df.copy()
     required_cols = [
         "F_Halpha_sum_dered",
@@ -1095,7 +1668,18 @@ def build_total_catalog(config: DerivedConfig | None = None, method: str = "summ
     all_catalog = merge_field_flux_catalogs(method=method, dig_mode=dig_mode)
     cat = add_logU_KK04(all_catalog.copy(), n_mc=config.logu_n_mc)
     density = add_electron_density(cat.copy(), n_mc=config.density_n_mc)
-    symmetry = add_symmetry_class(density.copy())
+    pressure = add_thermal_pressure(
+        density.copy(),
+        T_e=config.electron_temperature_K,
+        particle_factor=config.ionized_gas_particle_factor,
+    )
+    peak_properties = add_peak_region_properties(
+        pressure.copy(),
+        distance_mpc=config.m33_distance_mpc,
+        te_default=config.electron_temperature_K,
+        n_mc=config.density_n_mc,
+    )
+    symmetry = add_symmetry_class(peak_properties.copy())
     metallicity = add_metallicity_columns(symmetry.copy())
     metallicity = add_metallicity_error_columns(metallicity.copy(), n_mc=config.metallicity_n_mc)
     clustered, global_stats, ripley_df, pcf_df = add_clustering_metrics(metallicity.copy())
@@ -1103,6 +1687,8 @@ def build_total_catalog(config: DerivedConfig | None = None, method: str = "summ
         "all_catalog": all_catalog,
         "with_logu": cat,
         "with_density": density,
+        "with_pressure": pressure,
+        "with_peak_properties": peak_properties,
         "with_symmetry": symmetry,
         "with_metallicity": metallicity,
         "with_clustering": clustered,

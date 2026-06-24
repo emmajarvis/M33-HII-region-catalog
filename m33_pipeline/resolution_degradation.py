@@ -21,6 +21,7 @@ from .derived import (
     add_electron_density,
     add_logU_KK04,
     add_metallicity_columns,
+    add_thermal_pressure,
     deproject_pixels_to_disk_pc,
 )
 from .io import read_catalog, read_fits_data, read_fits_data_header, safe_mkdir, write_catalog, write_fits
@@ -749,6 +750,7 @@ def build_field_catalog_for_distance(field: str, distance_mpc: float, stage_path
     merged = add_galactocentric_radius(merged)
     merged = add_logU_KK04(merged, n_mc=0)
     merged = add_electron_density(merged, n_mc=0)
+    merged = add_thermal_pressure(merged)
     merged = add_metallicity_columns(merged, use_odr=False)
     merged["metallicity_indicator"] = merged["Z_O3N2_M2013"]
     return merged
@@ -983,6 +985,7 @@ def plot_derived_properties_vs_galactocentric_radius(
     properties = [
         ("logU_KK04", r"$\log U$", "logU_vs_rgal_all_distances.png"),
         ("ne_SII_cm3", r"$n_e$ [cm$^{-3}$]", "density_vs_rgal_all_distances.png"),
+        ("log_P_thermal_SII_over_k", r"$\log(P_{\rm th}/k_B)$ [K cm$^{-3}$]", "pressure_vs_rgal_all_distances.png"),
         ("metallicity_indicator", r"$12+\log({\rm O/H})$", "metallicity_vs_rgal_all_distances.png"),
     ]
     colors = plt.cm.rainbow(np.linspace(0, 1, len(catalogs_by_distance)))
@@ -994,6 +997,8 @@ def plot_derived_properties_vs_galactocentric_radius(
             if df.empty or column not in df.columns:
                 continue
             mask = np.isfinite(df["r_gal_kpc"]) & np.isfinite(df[column])
+            if column in {"ne_SII_cm3", "log_P_thermal_SII_over_k"} and "ne_SII_reliable" in df.columns:
+                mask &= df["ne_SII_reliable"].fillna(False).astype(bool)
             if mask.sum() == 0:
                 continue
             x = df.loc[mask, "r_gal_kpc"].to_numpy(dtype=float)

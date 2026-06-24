@@ -1,4 +1,4 @@
-Created: 2026-04-24T19:56:38
+Created: 2026-06-05T14:11:43
 
 === Field / parameters ===
 field   = F8
@@ -8,7 +8,7 @@ bgbox   = 25
 stdbox  = 3
 signoi  = 3.0
 
-=== Input files used (as defined in your notebook) ===
+=== Input files used ===
 filepeak = peak_files/data_for_visualisation_OIII+Ha_F8/A_PicL15_sizd10.fits
 file = peak_files/2-BG_Noi_Th_data_OIII+Ha_F8/Th_box25_std3_signoi3.0.fits
 
@@ -18,3 +18,4 @@ n_TH_peaks          = 387
 === Output files ===
 csv = final_peak_info/peaks_TH_fieldF8_L15_snr6_bg25_std3_signoi3.csv
 txt = final_peak_info/parameters_fieldF8_L15_snr6_bg25_std3_signoi3.txt
+latest_csv = final_peak_info/latest_peaks_F8.csv

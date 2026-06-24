@@ -1,0 +1,16 @@
+{
+  "boundary_small_removed": 1,
+  "candidate_peaks": 779,
+  "edge_removed": 0,
+  "field": "SE",
+  "final_peaks_after_zoi": 778,
+  "final_regions_after_boundary": 777,
+  "input_peaks": 795,
+  "max_zoi_pc": 100,
+  "min_domain_valid_pixels": 20,
+  "min_valid_pixels_threshold": 20,
+  "saddle_removed": 16,
+  "summary_version": 1,
+  "zoi_duplicate_removed": 0,
+  "zoi_small_removed": 1
+}

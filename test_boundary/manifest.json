@@ -1,0 +1,83 @@
+{
+  "created_at": "2026-06-17T18:38:36-04:00",
+  "fields": [
+    "NW",
+    "NE",
+    "SW",
+    "SE",
+    "F5",
+    "F6",
+    "F7",
+    "F8",
+    "F9"
+  ],
+  "dig_modes": [
+    "no_dig",
+    "dig_subtracted"
+  ],
+  "max_zoi_pc": 100,
+  "distance_mpc": 0.84,
+  "variants": {
+    "strict_small": {
+      "description": "Small-boundary stress test: higher peak-background fraction and high fallback sigma.",
+      "edge_frac": 0.7,
+      "fallback_sig_k": 20.0,
+      "global_p95_cap": true,
+      "domain_params": {
+        "max_zoi_pc": 100,
+        "assume_distance_mpc": 0.84,
+        "n_theta": 72,
+        "r_bin": 2.0,
+        "smooth_sigma": 1.2,
+        "edge_frac": 0.7,
+        "fallback_sig_k": 20.0,
+        "rmax_default": 100.0,
+        "ang_win_sectors": 19,
+        "mad_k_clip": 2.2,
+        "slope_alpha": 0.3,
+        "slope_min_px": 4.0,
+        "spike_k_neigh": 2.0,
+        "sg_window": 7,
+        "sg_poly": 2,
+        "global_p95_cap": true,
+        "influence_exp": 2.0,
+        "sizebox": 1,
+        "min_domain_valid_pixels": 20,
+        "max_prune_iter": 10
+      }
+    },
+    "loose_large": {
+      "description": "Large-boundary stress test: lower peak-background fraction, lower fallback sigma, no p95 radius cap.",
+      "edge_frac": 0.02,
+      "fallback_sig_k": 3.0,
+      "global_p95_cap": false,
+      "domain_params": {
+        "max_zoi_pc": 100,
+        "assume_distance_mpc": 0.84,
+        "n_theta": 72,
+        "r_bin": 2.0,
+        "smooth_sigma": 1.2,
+        "edge_frac": 0.02,
+        "fallback_sig_k": 3.0,
+        "rmax_default": 100.0,
+        "ang_win_sectors": 19,
+        "mad_k_clip": 2.2,
+        "slope_alpha": 0.3,
+        "slope_min_px": 4.0,
+        "spike_k_neigh": 2.0,
+        "sg_window": 7,
+        "sg_poly": 2,
+        "global_p95_cap": false,
+        "influence_exp": 2.0,
+        "sizebox": 1,
+        "min_domain_valid_pixels": 20,
+        "max_prune_iter": 10
+      }
+    }
+  },
+  "notes": [
+    "Peak catalog and ZoI maps are reused from the current pipeline products.",
+    "Domain-size pruning is not rerun, so peak identification is fixed for these tests.",
+    "Flux catalogs are summed-map catalogs for each requested DIG mode, intended for Halpha luminosity and luminosity-radius comparisons."
+  ]
+}

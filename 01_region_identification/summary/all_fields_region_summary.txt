@@ -1,0 +1,25 @@
+All Fields Region Identification Summary
+
+Fields included: 9
+
+- F5, input_peaks=746, saddle_removed=5, edge_removed=0, candidate_peaks=741, zoi_small_removed=7, zoi_duplicate_removed=0, final_peaks_after_zoi=734, boundary_small_removed=9, final_regions_after_boundary=725
+- F6, input_peaks=410, saddle_removed=7, edge_removed=0, candidate_peaks=403, zoi_small_removed=17, zoi_duplicate_removed=5, final_peaks_after_zoi=381, boundary_small_removed=8, final_regions_after_boundary=370
+- F7, input_peaks=965, saddle_removed=13, edge_removed=0, candidate_peaks=952, zoi_small_removed=0, zoi_duplicate_removed=0, final_peaks_after_zoi=952, boundary_small_removed=4, final_regions_after_boundary=948
+- F8, input_peaks=387, saddle_removed=9, edge_removed=0, candidate_peaks=378, zoi_small_removed=0, zoi_duplicate_removed=0, final_peaks_after_zoi=378, boundary_small_removed=5, final_regions_after_boundary=373
+- F9, input_peaks=284, saddle_removed=3, edge_removed=0, candidate_peaks=281, zoi_small_removed=0, zoi_duplicate_removed=0, final_peaks_after_zoi=281, boundary_small_removed=6, final_regions_after_boundary=275
+- NE, input_peaks=814, saddle_removed=17, edge_removed=0, candidate_peaks=797, zoi_small_removed=0, zoi_duplicate_removed=0, final_peaks_after_zoi=797, boundary_small_removed=4, final_regions_after_boundary=793
+- NW, input_peaks=1224, saddle_removed=35, edge_removed=0, candidate_peaks=1189, zoi_small_removed=1, zoi_duplicate_removed=0, final_peaks_after_zoi=1188, boundary_small_removed=0, final_regions_after_boundary=1183
+- SE, input_peaks=795, saddle_removed=16, edge_removed=0, candidate_peaks=779, zoi_small_removed=1, zoi_duplicate_removed=0, final_peaks_after_zoi=778, boundary_small_removed=1, final_regions_after_boundary=777
+- SW, input_peaks=1001, saddle_removed=16, edge_removed=0, candidate_peaks=985, zoi_small_removed=2, zoi_duplicate_removed=0, final_peaks_after_zoi=983, boundary_small_removed=4, final_regions_after_boundary=979
+
+Totals
+
+- input_peaks: 6626
+- saddle_removed: 121
+- edge_removed: 0
+- candidate_peaks: 6505
+- zoi_small_removed: 28
+- zoi_duplicate_removed: 5
+- final_peaks_after_zoi: 6472
+- boundary_small_removed: 41
+- final_regions_after_boundary: 6423
