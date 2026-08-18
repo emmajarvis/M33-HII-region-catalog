@@ -2,6 +2,8 @@ import os
 os.environ["OMP_NUM_THREADS"] = "16"
 from dataclasses import dataclass
 from datetime import datetime
+import json
+from typing import Optional, Set
 
 import numpy as np
 import pandas as pd
@@ -13,7 +15,6 @@ from IPython.utils import io
 from astropy.io import fits
 from astropy.table import QTable
 from astropy.wcs import WCS
-from orcs.process import SpectralCube
 
 
 plt.rc('text', usetex=True)
@@ -42,6 +43,20 @@ LIN = [
     r'[SII]6716',
     r'[SII]6731'
 ]
+
+
+F9_MAP_TO_SN3_TRANSFORMS = {
+    'SN2': {
+        'translation': (-150.09684687, 239.56422378),
+        'rotation': -0.04939253579218882,
+        'scale': 1.0283181093950018,
+    },
+    'SN1': {
+        'translation': (-146.80176523, 241.51289629),
+        'rotation': -0.04912481692335312,
+        'scale': 1.0254031617872643,
+    },
+}
 
 
 @dataclass
@@ -76,6 +91,7 @@ class IntegratedSpectraContext:
     dom1: np.ndarray
     dom2: np.ndarray
     dom3: np.ndarray
+    alignment_params: dict
 
     xpic: np.ndarray
     ypic: np.ndarray
@@ -87,6 +103,7 @@ class IntegratedSpectraContext:
     folder: str
 
     colors: np.ndarray
+    alignment_diagnostic_regions: Optional[Set[int]]
 
 
 def readdata(file):
@@ -95,8 +112,15 @@ def readdata(file):
     return data, hdr
 
 
-def get_field_config(field):
+def normalize_field(field):
     field = str(field)
+    if field.startswith('F') and field[1:] in {'5', '6', '7', '8', '9'}:
+        return field[1:]
+    return field
+
+
+def get_field_config(field):
+    field = normalize_field(field)
 
     if field == 'NW':
         return {
@@ -108,7 +132,7 @@ def get_field_config(field):
 
     elif field == 'NE':
         return {
-            'cube3': '/arc/home/emmajarvis/M33/M33-NE_SN3.merged.cm1.1.0.hdf5',
+            'cube3': '/arc/projects/signals/M33/M33-NE.2204014z.SN3.hdf5',
             'cube2': '/arc/projects/signals/M33/M33-NE_SN2.merged.cm1.1.0.hdf5',
             'cube1': '/arc/projects/signals/M33/M33-NE_SN1.merged.cm1.1.0.hdf5',
             'fnum': 1,
@@ -131,11 +155,27 @@ def get_field_config(field):
             
         }
 
+    elif field == '5':
+        return {
+            'cube3': '/arc/projects/signals/M33_FIELD5_SN3.hdf5',
+            'cube2': '/arc/projects/signals/M33/M33_Field5.2655759z.SN2.hdf5',
+            'cube1': '/arc/projects/signals/M33_Field5_SN1.merged.cm1.1.0.hdf5',
+            'fnum': 5,
+        }
+
+    elif field == '6':
+        return {
+            'cube3': '/arc/projects/signals/M33_FIELD6_SN3.hdf5',
+            'cube2': '/arc/projects/signals/M33_Field6_SN2.hdf5',
+            'cube1': '/arc/projects/signals/M33/M33_Field6.2683764z.SN1.hdf5',
+            'fnum': 6,
+        }
+
     elif field == '7':
         return {
-            'cube3': '/arc/projects/signals/M33_FIELD7_SN3_18BP41.hdf5',
-            'cube2': '/arc/projects/signals/M33_FIELD7_SN2_18BP41.hdf5',
-            'cube1': '/arc/projects/signals/M33_FIELD7_SN1_18BP41.hdf5',
+            'cube3': '/arc/projects/signals/M33_Field7.2309128z.SN3.hdf5',
+            'cube2': '/arc/projects/signals/M33_Field7.2325242z.SN2.hdf5',
+            'cube1': '/arc/projects/signals/M33_Field7.2326978z.SN1.hdf5',
             'fnum': 7,
         }
 
@@ -160,11 +200,101 @@ def get_field_config(field):
 
 
 def get_field_prefix(field):
-    return 'F' if str(field) in {'5', '6', '7', '8', '9'} else ''
+    return 'F' if normalize_field(field) in {'5', '6', '7', '8', '9'} else ''
 
 
 def get_maps_base(field, fprefix):
+    field = normalize_field(field)
     return f'/arc/home/emmajarvis/M33/M33-Maps/M33-{fprefix}{field}'
+
+
+def canonical_alignment_field(field):
+    field = normalize_field(field)
+    return f'F{field}' if field in {'5', '6', '7', '8', '9'} else field
+
+
+def load_alignment_params(alignment_folder, field):
+    if alignment_folder is None:
+        return {}
+
+    field_name = canonical_alignment_field(field)
+    params = {}
+    for filter_name in ('SN1', 'SN2'):
+        path = os.path.join(
+            os.path.expanduser(alignment_folder),
+            f'parametres_align_cube_corrige_{filter_name}_{field_name}.txt'
+        )
+        if not os.path.exists(path):
+            raise FileNotFoundError(
+                f"Missing {filter_name} alignment file for {field_name}: {path}"
+            )
+        with open(path) as fh:
+            params[filter_name] = json.load(fh)
+        print(f"Loaded {filter_name} alignment parameters:", path, params[filter_name])
+
+    return params
+
+
+def transform_boundary_map(boundary_map, transform):
+    import orb
+
+    transformed = orb.utils.image.transform_frame(
+        boundary_map.astype(float),
+        0,
+        boundary_map.shape[0],
+        0,
+        boundary_map.shape[1],
+        [-transform["dy"], -transform["dx"], transform["dtheta"], 0, 0],
+        [0, 0],
+        1,
+        0,
+    )
+    return np.rint(transformed).astype(boundary_map.dtype)
+
+
+def transform_f9_boundary_to_cube_grid(boundary_map, output_shape, transform):
+    """
+    Sample the SN3 boundary map onto the original F9 SN1/SN2 cube grid.
+
+    The stored F9 transform maps source SN1/SN2 map pixels into the SN3
+    reference frame. For cube extraction we need the reverse product: for each
+    source-grid pixel, read the corresponding SN3 boundary label.
+    """
+    from scipy.ndimage import map_coordinates
+
+    ny, nx = output_shape
+    yy, xx = np.indices((ny, nx), dtype=float)
+    theta = transform['rotation']
+    scale = transform['scale']
+    tx, ty = transform['translation']
+
+    cos_theta = np.cos(theta)
+    sin_theta = np.sin(theta)
+    ref_x = scale * (cos_theta * xx - sin_theta * yy) + tx
+    ref_y = scale * (sin_theta * xx + cos_theta * yy) + ty
+
+    sampled = map_coordinates(
+        boundary_map.astype(float),
+        [ref_y, ref_x],
+        order=0,
+        mode='constant',
+        cval=0.0,
+        prefilter=False,
+    )
+    return sampled.astype(boundary_map.dtype)
+
+
+def common_region_indices(domains):
+    common_labels = None
+    for dom in domains:
+        labels = set(np.unique(dom[np.isfinite(dom)]).astype(int))
+        labels.discard(0)
+        common_labels = labels if common_labels is None else common_labels & labels
+
+    if not common_labels:
+        return np.array([], dtype=int)
+
+    return np.array(sorted(label - 1 for label in common_labels), dtype=int)
 
 
 def make_output_folder(field, base_folder=None, timestamp=None):
@@ -204,8 +334,17 @@ def build_empty_flux_table():
     ])
 
 
-def load_context(field, base_output_folder=None, output_timestamp=None):
+def load_context(
+    field,
+    base_output_folder=None,
+    output_timestamp=None,
+    alignment_folder=None,
+    alignment_diagnostic_regions=None,
+):
     
+    from orcs.process import SpectralCube
+
+    field = normalize_field(field)
     cfg = get_field_config(field)
     fprefix = get_field_prefix(field)
     maps_base = get_maps_base(field, fprefix)
@@ -244,8 +383,30 @@ def load_context(field, base_output_folder=None, output_timestamp=None):
     npic = len(xpic)
 
     dom3, _ = readdata(f'DOMAIN_MAPS/Boundary_map_{fprefix}{field}.fits')
-    dom2 = dom3
-    dom1 = dom3
+    alignment_params = {}
+    if field == '9':
+        alignment_params = F9_MAP_TO_SN3_TRANSFORMS
+        dom2 = transform_f9_boundary_to_cube_grid(
+            dom3,
+            dom3.shape,
+            F9_MAP_TO_SN3_TRANSFORMS['SN2'],
+        )
+        dom1 = transform_f9_boundary_to_cube_grid(
+            dom3,
+            dom3.shape,
+            F9_MAP_TO_SN3_TRANSFORMS['SN1'],
+        )
+        ipic = common_region_indices((dom1, dom2, dom3))
+        npic = len(ipic)
+        print(f'F9 overlap filter: keeping {npic} region(s) present in SN1, SN2, and SN3')
+    else:
+        alignment_params = load_alignment_params(alignment_folder, field)
+        if alignment_params:
+            dom2 = transform_boundary_map(dom3, alignment_params['SN2'])
+            dom1 = transform_boundary_map(dom3, alignment_params['SN1'])
+        else:
+            dom2 = dom3
+            dom1 = dom3
 
     print()
     gal_vel = np.nanmean(velocity_map[100:2000, 100:2000])
@@ -288,6 +449,7 @@ def load_context(field, base_output_folder=None, output_timestamp=None):
         dom1=dom1,
         dom2=dom2,
         dom3=dom3,
+        alignment_params=alignment_params,
         xpic=xpic,
         ypic=ypic,
         ipic=ipic,
@@ -296,6 +458,7 @@ def load_context(field, base_output_folder=None, output_timestamp=None):
         wlines=wlines,
         folder=folder,
         colors=colors,
+        alignment_diagnostic_regions=alignment_diagnostic_regions,
     )
 
 
@@ -425,6 +588,57 @@ def makeplot(codex, codey, codelog, codecmap, alp, codebar,
         plt.ylabel('Y', size=15)
 
 
+def get_filter_positions(ctx, x3, y3):
+    r3, d3 = ctx.wcs3.wcs_pix2world(x3, y3, 0)
+    x2, y2 = ctx.wcs2.wcs_world2pix(r3, d3, 0)
+    x1, y1 = ctx.wcs1.wcs_world2pix(r3, d3, 0)
+    return int(x1), int(y1), int(x2), int(y2), int(x3), int(y3)
+
+
+def clipped_window(x, y, shape, half_size):
+    ny, nx = shape
+    x1 = max(0, int(x - half_size))
+    x2 = min(nx, int(x + half_size))
+    y1 = max(0, int(y - half_size))
+    y2 = min(ny, int(y + half_size))
+    return x1, x2, y1, y2
+
+
+def plot_flux_boundary_alignment(ctx, ireg, x0, y0, half_size=80):
+    x1, y1, x2, y2, x3, y3 = get_filter_positions(ctx, x0, y0)
+    panels = [
+        (ctx.fluxha, ctx.dom3, x3, y3, r'H$\alpha$ / SN3'),
+        (ctx.fluxo3, ctx.dom2, x2, y2, r'[OIII]$\lambda$5007 / SN2'),
+        (ctx.fluxo2, ctx.dom1, x1, y1, r'[OII]$\lambda$3727 / SN1'),
+    ]
+
+    fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+    for ax, (image, dom, x, y, title) in zip(axes, panels):
+        xlo, xhi, ylo, yhi = clipped_window(x, y, image.shape, half_size)
+        crop = image[ylo:yhi, xlo:xhi].astype(float)
+        mask = (dom[ylo:yhi, xlo:xhi] - 1) == ireg
+
+        plot_image = np.log10(np.where(crop > 0, crop, np.nan))
+        finite = np.isfinite(plot_image)
+        if np.any(finite):
+            vmin = np.nanpercentile(plot_image, 5)
+            vmax = np.nanpercentile(plot_image, 99)
+        else:
+            vmin, vmax = None, None
+
+        ax.imshow(plot_image, origin='lower', cmap='magma', vmin=vmin, vmax=vmax)
+        if np.any(mask):
+            ax.contour(mask.astype(float), levels=[0.5], colors='cyan', linewidths=1.5)
+        ax.plot(x - xlo, y - ylo, '+', color='white', ms=10, mew=1.5)
+        ax.set_title(title)
+        ax.set_xlabel('X')
+        ax.set_ylabel('Y')
+
+    fig.suptitle(f'Region {ireg} boundary alignment')
+    fig.savefig(f'{ctx.folder}/Alignment_check_{ireg}.jpeg', bbox_inches='tight')
+    plt.close(fig)
+
+
 def makeplotspec(ireg, x0, y0,
                  wn1, sp1, fi1,
                  wn2, sp2, fi2,
@@ -445,12 +659,7 @@ def makeplotspec(ireg, x0, y0,
     ymin, ymax = ymin - dely, ymax + dely
 
     imasiz = 30
-    x3, y3 = x0, y0
-    r3, d3 = ctx.wcs3.wcs_pix2world(x3, y3, 0)
-    x2, y2 = ctx.wcs2.wcs_world2pix(r3, d3, 0)
-    x2, y2 = int(x2), int(y2)
-    x1, y1 = ctx.wcs1.wcs_world2pix(r3, d3, 0)
-    x1, y1 = int(x1), int(y1)
+    x1, y1, x2, y2, x3, y3 = get_filter_positions(ctx, x0, y0)
 
     nyy, nxx, ip = 5, 3, 0
     fig = plt.figure(figsize=(6 * nxx, 4.5 * nyy))
@@ -619,7 +828,7 @@ def format_result_row(ireg, x0, y0, fnum, flu, err, snr):
     ]
 
 
-def run_region_fit(ctx, ireg, plotshow=True):
+def run_region_fit(ctx, ireg, plotshow=True, make_spectrum_plot=False):
     x0, y0 = int(ctx.xpic[ireg]), int(ctx.ypic[ireg])
 
     wn1, sp1, fi1, flu1, err1, snr1, ok1 = fit_spectrum(
@@ -636,13 +845,17 @@ def run_region_fit(ctx, ireg, plotshow=True):
     err = [*err1, *err2, *err3]
     snr = [*snr1, *snr2, *snr3]
 
-    # makeplotspec(
-    #     ireg, x0, y0,
-    #     wn1, sp1, fi1,
-    #     wn2, sp2, fi2,
-    #     wn3, sp3, fi3,
-    #     flu, err, snr, LIN, plotshow, ctx
-    # )
+    if make_spectrum_plot:
+        makeplotspec(
+            ireg, x0, y0,
+            wn1, sp1, fi1,
+            wn2, sp2, fi2,
+            wn3, sp3, fi3,
+            flu, err, snr, LIN, plotshow, ctx
+        )
+
+    if ctx.alignment_diagnostic_regions and ireg in ctx.alignment_diagnostic_regions:
+        plot_flux_boundary_alignment(ctx, ireg, x0, y0)
 
     row = format_result_row(ireg, x0, y0, ctx.fnum, flu, err, snr)
 

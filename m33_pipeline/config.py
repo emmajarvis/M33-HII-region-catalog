@@ -19,20 +19,14 @@ class PhotometryConfig:
     clip_negative_after_bg: bool = False
     dig_clip_sigma: float = 3.0
     dig_clip_iterations: int = 2
-    dig_background_percentile: float = 2.0
-    dig_line_ratio_to_halpha: dict[str, float] = field(
-        default_factory=lambda: {
-            "Halpha": 1.0,
-            "Hbeta": 1.0 / 3.1,
-            "[OIII]4959": 0.03,
-            "[OIII]5007": 0.09,
-            "[NII]6548": 0.07,
-            "[NII]6583": 0.21,
-            "[SII]6716": 0.12,
-            "[SII]6731": 0.09,
-            "[OII]3727": 0.25,
-        }
-    )
+    dig_background_percentile: float = 50.0
+    dig_annulus_inner_px: int = 1
+    dig_annulus_width_fraction: float = 0.25
+    dig_annulus_min_width_px: int = 2
+    dig_annulus_max_width_px: int = 25
+    dig_background_smooth_sigma_px: float = 35.0
+    dig_background_min_weight: float = 1.0e-3
+    dig_max_subtraction_fraction: float = 0.5
 
 
 @dataclass(frozen=True)

@@ -8,6 +8,7 @@ from m33_pipeline.reporting import (
     add_fit_values,
     add_region_removal_values,
     build_catalog_number_values,
+    ensure_latex_math,
     format_value,
     latex_command_name,
     write_latex_commands,
@@ -31,6 +32,9 @@ class ReportingTest(unittest.TestCase):
                 "radius_p84_pc": [12.0, 13.0, 14.0, 15.0],
                 "radius_areaeq_pc": [9.0, 10.0, 11.0, 12.0],
                 "logU_KK04": [-3.1, -3.0, -2.9, -2.8],
+                "logU_KK04_e": [0.1, 0.2, 0.4, 0.1],
+                "logU_flag": ["ok", "ok", "ok", "invalid"],
+                "logU_KK04_converged_fraction": [0.9, 0.8, 0.9, 0.9],
                 "Z_N2S2Halpha_Brazzini2024": [8.3, 8.4, 8.5, 8.6],
                 "sum_A_V": [0.1, 0.2, 0.3, 0.4],
                 "DIG_fraction": [0.2, 0.3, 0.4, 0.5],
@@ -39,6 +43,12 @@ class ReportingTest(unittest.TestCase):
                 "sum_E_BV": [0.05, 0.06, 0.07, 0.08],
                 "nearest_neighbor_pc_deproj": [20.0, 25.0, 30.0, 35.0],
                 "sigma5_per_pc2_deproj": [1e-3, 2e-3, 3e-3, 4e-3],
+                "log_P_thermal_SII_over_k": [6.0, 6.1, 6.2, 6.3],
+                "ne_SII_reliable": [True, True, False, True],
+                "ne_SII_is_upper_limit": [False, True, False, False],
+                "ne_SII_ratio_well_constrained": [True, True, True, False],
+                "P_thermal_SII_reliable": [True, True, False, True],
+                "P_thermal_SII_is_upper_limit": [False, True, False, False],
                 "has_snr_in_boundary": [True, False, True, False],
                 "has_wr_in_boundary": [False, True, True, False],
                 "has_pn_in_boundary": [True, False, True, False],
@@ -52,6 +62,14 @@ class ReportingTest(unittest.TestCase):
         self.assertEqual(values["nStarformingSNRThree"], 1)
         self.assertEqual(values["nCompositeSNRThree"], 1)
         self.assertEqual(values["nAgnSNRThree"], 0)
+        self.assertEqual(values["nLogUQuality"], 2)
+        self.assertEqual(values["nLogUFinite"], 4)
+        self.assertEqual(values["nDensityQuality"], 1)
+        self.assertEqual(values["nDensityFinite"], 4)
+        self.assertEqual(values["nDensityUpperLimits"], 1)
+        self.assertEqual(values["nPressureQuality"], 1)
+        self.assertEqual(values["nPressureFinite"], 4)
+        self.assertEqual(values["nPressureUpperLimits"], 1)
         self.assertIn("medianlogLHa", values)
         self.assertIn("medianlogLHa", formats)
         self.assertEqual(values["nRegionsContainingSNR"], 2)
@@ -63,14 +81,21 @@ class ReportingTest(unittest.TestCase):
     def test_write_latex_commands(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             path = Path(tmpdir) / "numbers.tex"
-            out = write_latex_commands(path, {"nregions": 3, "medianlogLHa": 37.0}, {"medianlogLHa": ".1f"})
+            out = write_latex_commands(
+                path,
+                {"nregions": 3, "medianlogLHa": 37.0, "slope": -0.1},
+                {"medianlogLHa": ".1f", "slope": ".1f"},
+            )
             text = out.read_text()
-            self.assertIn(r"\newcommand{\nregions}{3}", text)
-            self.assertIn(r"\newcommand{\medianlogLHa}{37.0}", text)
+            self.assertIn(r"\newcommand{\nregions}{$3$}", text)
+            self.assertIn(r"\newcommand{\medianlogLHa}{$37.0$}", text)
+            self.assertIn(r"\newcommand{\slope}{$-0.1$}", text)
 
     def test_latex_commands_spell_out_digits_and_format_scientific_notation(self):
         self.assertEqual(latex_command_name("resolutionD0p84"), "resolutionDZeropEightFour")
         self.assertEqual(format_value(1.2e36, ".2e"), r"$1.20\times10^{36}$")
+        self.assertEqual(ensure_latex_math("3"), "$3$")
+        self.assertEqual(ensure_latex_math(r"$1.20\times10^{36}$"), r"$1.20\times10^{36}$")
         with tempfile.TemporaryDirectory() as tmpdir:
             path = Path(tmpdir) / "numbers.tex"
             write_latex_commands(path, {"value2": 1.2e36}, {"value2": ".2e"})

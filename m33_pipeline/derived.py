@@ -1130,7 +1130,7 @@ def poly_eval(coeffs, z):
     return np.polyval(coeffs[::-1], z)
 
 
-def invert_logR_to_Z(coeffs, logR_obs, z_min=-2.5, z_max=0.8, ngrid=2000):
+def invert_logR_to_Z(coeffs, logR_obs, z_min=-2.5, z_max=0.8, ngrid=2000, branch="upper"):
     if not np.isfinite(logR_obs):
         return np.nan
     zgrid = np.linspace(z_min, z_max, ngrid)
@@ -1155,19 +1155,20 @@ def invert_logR_to_Z(coeffs, logR_obs, z_min=-2.5, z_max=0.8, ngrid=2000):
         if (not at_edge) and best_abs < 1e-3:
             return zgrid[best_i]
         return np.nan
-    best_i = None
-    best_val = np.inf
+    roots = []
     for i in idx:
-        midz = 0.5 * (zgrid[i] + zgrid[i + 1])
-        val = abs(poly_eval(coeffs, midz) - logR_obs)
-        if val < best_val:
-            best_val = val
-            best_i = i
-    a, b = zgrid[best_i], zgrid[best_i + 1]
-    try:
-        return brentq(lambda z: poly_eval(coeffs, z) - logR_obs, a, b, maxiter=200)
-    except ValueError:
+        a, b = zgrid[i], zgrid[i + 1]
+        try:
+            roots.append(brentq(lambda z: poly_eval(coeffs, z) - logR_obs, a, b, maxiter=200))
+        except ValueError:
+            continue
+    if not roots:
         return np.nan
+    if branch == "upper":
+        return max(roots)
+    if branch == "lower":
+        return min(roots)
+    return roots[int(np.argmin([abs(poly_eval(coeffs, root) - logR_obs) for root in roots]))]
 
 
 def odr_refine_z(coeffs, logR_obs, z0, sx=1.0, sy=1.0, z_min=-2.5, z_max=0.8):
@@ -1194,24 +1195,100 @@ class Calibration:
     name: str
     coeffs: np.ndarray
     R_func: callable
+    valid_oh_range: tuple[float, float]
+    reference: str
+    branch: str = "upper"
+
+
+METALLICITY_VALID_RANGES = {
+    "Z_N2S2Halpha_Brazzini2024": ((7.50, 8.80), "N2S2Halpha", "Brazzini et al. 2024"),
+    "Z_N2_Brazzini2024": ((7.50, 8.80), "N2", "Brazzini et al. 2024"),
+    "Z_O3N2_Brazzini2024": ((7.50, 8.80), "O3N2", "Brazzini et al. 2024"),
+    "Z_R3_Brazzini2024": ((7.50, 8.80), "R3", "Brazzini et al. 2024"),
+    "Z_R23_Maiolino2008": ((7.05, 9.20), "R23", "Maiolino et al. 2008"),
+    "Z_N2_Maiolino2008": ((7.05, 9.20), "N2", "Maiolino et al. 2008"),
+    "Z_R23_Curti2017": ((7.60, 8.85), "R23", "Curti et al. 2017"),
+    "Z_R3_Curti2017": ((7.60, 8.85), "R3", "Curti et al. 2017"),
+    "Z_N2_Curti2017": ((7.60, 8.85), "N2", "Curti et al. 2017"),
+    "Z_O3N2_Curti2017": ((7.60, 8.85), "O3N2", "Curti et al. 2017"),
+    "Z_R_Pilyugin2016_highN2": ((7.00, 8.80), "R high-N2", "Pilyugin & Grebel 2016"),
+    "Z_R_Pilyugin2016_lowN2": ((7.00, 8.80), "R low-N2", "Pilyugin & Grebel 2016"),
+    "Z_S_Pilyugin2016_highN2": ((7.00, 8.80), "S high-N2", "Pilyugin & Grebel 2016"),
+    "Z_S_Pilyugin2016_lowN2": ((7.00, 8.80), "S low-N2", "Pilyugin & Grebel 2016"),
+    "Z_R23_KK2004": ((8.40, 9.40), "R23 upper branch", "Kobulnicky & Kewley 2004"),
+    "Z_NII_KD2002": ((8.40, 9.40), "N2O2", "Kewley & Dopita 2002"),
+    "Z_D2016": ((7.40, 9.40), "N2S2Halpha", "Dopita et al. 2016"),
+    "Z_O3N2_M2013": ((7.60, 8.80), "O3N2", "Marino et al. 2013"),
+    "Z_N2_M2013": ((7.60, 8.80), "N2", "Marino et al. 2013"),
+    "Z_C2001": ((7.10, 9.10), "CL01", "Charlot & Longhetti 2001"),
+    "Z_N2_PP2004": ((8.12, 9.05), "N2", "Pettini & Pagel 2004"),
+    "Z_O3N2_PP2004": ((8.12, 9.05), "O3N2", "Pettini & Pagel 2004"),
+    "Z_N2_Brown2016": ((7.60, 9.30), "N2", "Brown et al. 2016"),
+    "Z_O3N2_Brown2016": ((7.60, 9.30), "O3N2", "Brown et al. 2016"),
+    "Z_N2O2_Brown2016": ((7.60, 9.30), "N2O2", "Brown et al. 2016"),
+    "Z_N2O2_KD2002": ((8.40, 9.40), "N2O2", "Kewley & Dopita 2002"),
+}
+
+
+def metallicity_valid_range_summary() -> pd.DataFrame:
+    rows = []
+    for column, (valid_range, indicator, reference) in METALLICITY_VALID_RANGES.items():
+        rows.append(
+            {
+                "column": column,
+                "indicator": indicator,
+                "reference": reference,
+                "valid_12logOH_min": valid_range[0],
+                "valid_12logOH_max": valid_range[1],
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def print_metallicity_valid_ranges() -> None:
+    summary = metallicity_valid_range_summary()
+    print("Adopted metallicity calibration validity ranges:")
+    for row in summary.itertuples(index=False):
+        print(
+            f"{row.column}: {row.valid_12logOH_min:.2f} <= 12+log(O/H) <= "
+            f"{row.valid_12logOH_max:.2f}; indicator={row.indicator}; reference={row.reference}"
+        )
+
+
+def _mask_to_valid_metallicity_range(values, column):
+    if column not in METALLICITY_VALID_RANGES:
+        return values
+    lo, hi = METALLICITY_VALID_RANGES[column][0]
+    arr = np.asarray(values, dtype=float).copy()
+    arr[(arr < lo) | (arr > hi)] = np.nan
+    return arr
+
+
+def _apply_valid_metallicity_ranges(df: pd.DataFrame, columns=None) -> pd.DataFrame:
+    out = df.copy()
+    use_columns = METALLICITY_VALID_RANGES if columns is None else columns
+    for col in use_columns:
+        if col in out.columns:
+            out[col] = _mask_to_valid_metallicity_range(out[col], col)
+    return out
 
 
 def build_calibrations():
     return [
-        Calibration("N2S2Halpha_Brazzini2024", np.array([0.24, 2.21, 0.76]), lambda N2, S2, R3, R2, R23: N2 / S2 * (N2**0.264)),
-        Calibration("N2_Brazzini2024", np.array([-0.41, 0.57, -4.91, -5.81, -1.95]), lambda N2, S2, R3, R2, R23: N2),
-        Calibration("O3N2_Brazzini2024", np.array([-0.51, -7.74, -6.12, -1.60]), lambda N2, S2, R3, R2, R23: R3 / N2),
-        Calibration("R3_Brazzini2024", np.array([-0.84, -5.86, -6.27, -1.95]), lambda N2, S2, R3, R2, R23: R3),
-        Calibration("R23_Maiolino2008", np.array([0.7462, -0.7149, -0.9401, -0.6154, -0.2524]), lambda N2, S2, R3, R2, R23: R23),
-        Calibration("N2_Maiolino2008", np.array([-0.7732, 1.2357, -0.2811, -0.7201, -0.3330]), lambda N2, S2, R3, R2, R23: N2),
-        Calibration("R3_Curti2017", np.array([-0.277, -3.549, -3.593, -0.981]), lambda N2, S2, R3, R2, R23: R3),
-        Calibration("R23_Curti2017", np.array([0.527, -1.569, -1.652, -0.421]), lambda N2, S2, R3, R2, R23: R23),
-        Calibration("N2_Curti2017", np.array([-0.489, 1.513, -2.554, -5.293, -2.867]), lambda N2, S2, R3, R2, R23: N2),
-        Calibration("O3N2_Curti2017", np.array([-0.281, -4.765, -2.268]), lambda N2, S2, R3, R2, R23: R3 / N2),
+        Calibration("N2S2Halpha_Brazzini2024", np.array([0.24, 2.21, 0.76]), lambda N2, S2, R3, R2, R23: N2 / S2 * (N2**0.264), *METALLICITY_VALID_RANGES["Z_N2S2Halpha_Brazzini2024"][0::2], branch="upper"),
+        Calibration("N2_Brazzini2024", np.array([-0.41, 0.57, -4.91, -5.81, -1.95]), lambda N2, S2, R3, R2, R23: N2, *METALLICITY_VALID_RANGES["Z_N2_Brazzini2024"][0::2], branch="upper"),
+        Calibration("O3N2_Brazzini2024", np.array([-0.51, -7.74, -6.12, -1.60]), lambda N2, S2, R3, R2, R23: R3 / N2, *METALLICITY_VALID_RANGES["Z_O3N2_Brazzini2024"][0::2], branch="upper"),
+        Calibration("R3_Brazzini2024", np.array([-0.84, -5.86, -6.27, -1.95]), lambda N2, S2, R3, R2, R23: R3, *METALLICITY_VALID_RANGES["Z_R3_Brazzini2024"][0::2], branch="upper"),
+        Calibration("R23_Maiolino2008", np.array([0.7462, -0.7149, -0.9401, -0.6154, -0.2524]), lambda N2, S2, R3, R2, R23: R23, *METALLICITY_VALID_RANGES["Z_R23_Maiolino2008"][0::2], branch="upper"),
+        Calibration("N2_Maiolino2008", np.array([-0.7732, 1.2357, -0.2811, -0.7201, -0.3330]), lambda N2, S2, R3, R2, R23: N2, *METALLICITY_VALID_RANGES["Z_N2_Maiolino2008"][0::2], branch="upper"),
+        Calibration("R3_Curti2017", np.array([-0.277, -3.549, -3.593, -0.981]), lambda N2, S2, R3, R2, R23: R3, *METALLICITY_VALID_RANGES["Z_R3_Curti2017"][0::2], branch="upper"),
+        Calibration("R23_Curti2017", np.array([0.527, -1.569, -1.652, -0.421]), lambda N2, S2, R3, R2, R23: R23, *METALLICITY_VALID_RANGES["Z_R23_Curti2017"][0::2], branch="upper"),
+        Calibration("N2_Curti2017", np.array([-0.489, 1.513, -2.554, -5.293, -2.867]), lambda N2, S2, R3, R2, R23: N2, *METALLICITY_VALID_RANGES["Z_N2_Curti2017"][0::2], branch="upper"),
+        Calibration("O3N2_Curti2017", np.array([-0.281, -4.765, -2.268]), lambda N2, S2, R3, R2, R23: R3 / N2, *METALLICITY_VALID_RANGES["Z_O3N2_Curti2017"][0::2], branch="upper"),
     ]
 
 
-def compute_metallicities(full_catalog, z_min=-2.5, z_max=0.8, use_odr=True, sx=1.0, sy=1.0):
+def compute_metallicities(full_catalog, z_min=None, z_max=None, use_odr=True, sx=1.0, sy=1.0):
     ha = np.asarray(full_catalog["F_Halpha_sum_dered"], float)
     hb = np.asarray(full_catalog["F_Hbeta_sum_dered"], float)
     nii = np.asarray(full_catalog["F_[NII]6583_sum_dered"], float)
@@ -1236,9 +1313,17 @@ def compute_metallicities(full_catalog, z_min=-2.5, z_max=0.8, use_odr=True, sx=
         for i, logR_i in enumerate(logR):
             if not np.isfinite(logR_i):
                 continue
-            z0 = invert_logR_to_Z(cal.coeffs, logR_i, z_min=z_min, z_max=z_max)
+            cal_z_min = cal.valid_oh_range[0] - 8.69 if z_min is None else z_min
+            cal_z_max = cal.valid_oh_range[1] - 8.69 if z_max is None else z_max
+            z0 = invert_logR_to_Z(
+                cal.coeffs,
+                logR_i,
+                z_min=cal_z_min,
+                z_max=cal_z_max,
+                branch=cal.branch,
+            )
             Z[i] = (
-                odr_refine_z(cal.coeffs, logR_i, z0, sx=sx, sy=sy, z_min=z_min, z_max=z_max)
+                odr_refine_z(cal.coeffs, logR_i, z0, sx=sx, sy=sy, z_min=cal_z_min, z_max=cal_z_max)
                 if use_odr and np.isfinite(z0)
                 else z0
             )
@@ -1246,7 +1331,9 @@ def compute_metallicities(full_catalog, z_min=-2.5, z_max=0.8, use_odr=True, sx=
     return out
 
 
-def add_metallicity_columns(df: pd.DataFrame, use_odr: bool = True) -> pd.DataFrame:
+def add_metallicity_columns(df: pd.DataFrame, use_odr: bool = True, print_valid_ranges: bool = False) -> pd.DataFrame:
+    if print_valid_ranges:
+        print_metallicity_valid_ranges()
     out = df.copy()
     z_dict = compute_metallicities(out, use_odr=use_odr)
     out["Z_N2_Brazzini2024"] = z_dict["N2_Brazzini2024"] + 8.69
@@ -1295,7 +1382,7 @@ def add_metallicity_columns(df: pd.DataFrame, use_odr: bool = True) -> pd.DataFr
         out["Z_O3N2_Brown2016"] = 8.98 - 0.32 * np.log10((oiii / hb) / n2)
         out["Z_N2O2_Brown2016"] = 9.20 + 0.54 * np.log10(nii / oii)
         out["Z_N2O2_KD2002"] = np.log10(1.54020 + 1.26602 * nii / oii + 0.167977 * (nii / oii) ** 2) + 8.93
-    return out
+    return _apply_valid_metallicity_ranges(out)
 
 
 def add_metallicity_error_columns(df: pd.DataFrame, n_mc: int = 50, seed: int = 123) -> pd.DataFrame:
@@ -1458,12 +1545,25 @@ def add_metallicity_error_columns(df: pd.DataFrame, n_mc: int = 50, seed: int = 
             goodR = np.isfinite(ratio) & (ratio > 0)
             logR[goodR] = np.log10(ratio[goodR])
             z = np.full_like(logR, np.nan, dtype=float)
+            cal_z_min = cal.valid_oh_range[0] - 8.69
+            cal_z_max = cal.valid_oh_range[1] - 8.69
             for j, logR_j in enumerate(logR):
                 if not np.isfinite(logR_j):
                     continue
-                z0 = invert_logR_to_Z(cal.coeffs, logR_j)
-                z[j] = odr_refine_z(cal.coeffs, logR_j, z0) if np.isfinite(z0) else np.nan
-            z_draws[base_name_map[cal.name]] = z + 8.69
+                z0 = invert_logR_to_Z(
+                    cal.coeffs,
+                    logR_j,
+                    z_min=cal_z_min,
+                    z_max=cal_z_max,
+                    branch=cal.branch,
+                )
+                z[j] = (
+                    odr_refine_z(cal.coeffs, logR_j, z0, z_min=cal_z_min, z_max=cal_z_max)
+                    if np.isfinite(z0)
+                    else np.nan
+                )
+            col = base_name_map[cal.name]
+            z_draws[col] = _mask_to_valid_metallicity_range(z + 8.69, col)
 
         with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
             SII = d_sii1 + d_sii2
@@ -1495,6 +1595,7 @@ def add_metallicity_error_columns(df: pd.DataFrame, n_mc: int = 50, seed: int = 
             z_draws["Z_N2O2_KD2002"] = np.log10(1.54020 + 1.26602 * d_nii / d_oii + 0.167977 * (d_nii / d_oii) ** 2) + 8.93
 
         for col in cal_names:
+            z_draws[col] = _mask_to_valid_metallicity_range(z_draws[col], col)
             out.at[i, f"{col}_e"] = mc_percentile_sigma(np.asarray(z_draws[col], dtype=float))
 
     return out

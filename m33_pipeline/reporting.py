@@ -84,6 +84,16 @@ def format_value(value, fmt: str | None = None) -> str:
     return latex_escape(str(value))
 
 
+def ensure_latex_math(value: str) -> str:
+    """Wrap a formatted numeric value in math mode unless it is already wrapped."""
+    value = str(value)
+    if value.startswith("$") and value.endswith("$"):
+        return value
+    if value == "N/A":
+        return value
+    return f"${value}$"
+
+
 def write_latex_commands(filename: str | Path, values: dict, formats: dict | None = None) -> Path:
     filename = Path(filename)
     formats = formats or {}
@@ -93,10 +103,115 @@ def write_latex_commands(filename: str | Path, values: dict, formats: dict | Non
         "",
     ]
     for cmd, value in values.items():
-        formatted = format_value(value, formats.get(cmd))
+        formatted = ensure_latex_math(format_value(value, formats.get(cmd)))
         lines.append(rf"\newcommand{{\{latex_command_name(cmd)}}}{{{formatted}}}")
     filename.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return filename
+
+
+def _bool_quality_column(df: pd.DataFrame, col: str, default: bool = False) -> np.ndarray:
+    if col not in df.columns:
+        return pd.Series(default, index=df.index, dtype=bool).to_numpy(dtype=bool)
+    values = df[col]
+    if values.dtype == bool:
+        return values.fillna(default).to_numpy(dtype=bool)
+    normalized = values.astype(str).str.strip().str.lower()
+    return normalized.isin(["true", "1", "yes"]).to_numpy(dtype=bool)
+
+
+def logu_pressure_quality_masks(
+    cat: pd.DataFrame,
+    *,
+    logu_min_converged_fraction: float = 0.8,
+    logu_max_err: float = 0.3,
+) -> dict[str, np.ndarray | str]:
+    """Return quality masks used for logU and pressure analysis cuts."""
+    logu = pd.to_numeric(cat.get("logU_KK04", pd.Series(np.nan, index=cat.index)), errors="coerce")
+    logu_err_col = "logU_KK04_e" if "logU_KK04_e" in cat.columns else "logU_KK04_err"
+    logu_err = pd.to_numeric(cat.get(logu_err_col, pd.Series(np.nan, index=cat.index)), errors="coerce")
+    conv_frac = pd.to_numeric(
+        cat.get("logU_KK04_converged_fraction", pd.Series(np.nan, index=cat.index)),
+        errors="coerce",
+    )
+    logu_ok_flag = (
+        cat.get("logU_flag", pd.Series("ok", index=cat.index))
+        .astype(str)
+        .str.strip()
+        .str.lower()
+        .eq("ok")
+    )
+    logu_quality = (
+        np.isfinite(logu)
+        & (logu > -4)
+        & (logu < -2)
+        & logu_ok_flag.to_numpy(dtype=bool)
+        & np.isfinite(conv_frac)
+        & (conv_frac >= logu_min_converged_fraction)
+        & np.isfinite(logu_err)
+        & (logu_err <= logu_max_err)
+    )
+
+    pressure = pd.to_numeric(
+        cat.get("log_P_thermal_SII_over_k", pd.Series(np.nan, index=cat.index)),
+        errors="coerce",
+    )
+    pressure_reliable = _bool_quality_column(cat, "P_thermal_SII_reliable", default=False)
+    pressure_upper_limit = _bool_quality_column(cat, "P_thermal_SII_is_upper_limit", default=False)
+    ratio_well_constrained = _bool_quality_column(cat, "ne_SII_ratio_well_constrained", default=False)
+    pressure_quality = (
+        np.isfinite(pressure)
+        & pressure_reliable
+        & (~pressure_upper_limit)
+        & ratio_well_constrained
+    )
+
+    ne = pd.to_numeric(cat.get("ne_SII_cm3", pd.Series(np.nan, index=cat.index)), errors="coerce")
+    ne_reliable = _bool_quality_column(cat, "ne_SII_reliable", default=False)
+    ne_upper_limit = _bool_quality_column(cat, "ne_SII_is_upper_limit", default=False)
+    density_quality = (
+        np.isfinite(ne)
+        & ne_reliable
+        & (~ne_upper_limit)
+        & ratio_well_constrained
+    )
+
+    return {
+        "logU": np.asarray(logu_quality, dtype=bool),
+        "pressure": np.asarray(pressure_quality, dtype=bool),
+        "density": np.asarray(density_quality, dtype=bool),
+        "logu_err_col": logu_err_col,
+    }
+
+
+def add_quality_cut_values(
+    values: dict,
+    cat: pd.DataFrame,
+    *,
+    logu_min_converged_fraction: float = 0.8,
+    logu_max_err: float = 0.3,
+) -> None:
+    masks = logu_pressure_quality_masks(
+        cat,
+        logu_min_converged_fraction=logu_min_converged_fraction,
+        logu_max_err=logu_max_err,
+    )
+    logu = pd.to_numeric(cat.get("logU_KK04", pd.Series(np.nan, index=cat.index)), errors="coerce")
+    pressure = pd.to_numeric(
+        cat.get("log_P_thermal_SII_over_k", pd.Series(np.nan, index=cat.index)),
+        errors="coerce",
+    )
+    ne = pd.to_numeric(cat.get("ne_SII_cm3", pd.Series(np.nan, index=cat.index)), errors="coerce")
+    ne_upper_limit = _bool_quality_column(cat, "ne_SII_is_upper_limit", default=False)
+    pressure_upper_limit = _bool_quality_column(cat, "P_thermal_SII_is_upper_limit", default=False)
+
+    values["nLogUQuality"] = int(np.asarray(masks["logU"], dtype=bool).sum())
+    values["nLogUFinite"] = int(np.isfinite(logu).sum())
+    values["nDensityQuality"] = int(np.asarray(masks["density"], dtype=bool).sum())
+    values["nDensityFinite"] = int(np.isfinite(ne).sum())
+    values["nDensityUpperLimits"] = int(ne_upper_limit.sum())
+    values["nPressureQuality"] = int(np.asarray(masks["pressure"], dtype=bool).sum())
+    values["nPressureFinite"] = int(np.isfinite(pressure).sum())
+    values["nPressureUpperLimits"] = int(pressure_upper_limit.sum())
 
 
 def add_summary_stats(values: dict, formats: dict, df: pd.DataFrame, col: str, prefix: str, fmt: str = ".2f") -> None:
@@ -375,6 +490,7 @@ def build_catalog_number_values(
     values["nCompositeSNRThree"] = int(((bpt_class == "Composite") & snr_three_mask).sum())
     values["nAgnSNRThree"] = int(((bpt_class == "AGN/Shock") & snr_three_mask).sum())
     values["nregionsdensity"] = len(cat[~pd.isna(cat["ne_SII_cm3"])])
+    add_quality_cut_values(values, cat)
     if {"has_snr_in_boundary", "has_wr_in_boundary"}.issubset(cat.columns):
         snr_hosts = cat["has_snr_in_boundary"].fillna(False).astype(bool)
         wr_hosts = cat["has_wr_in_boundary"].fillna(False).astype(bool)

@@ -1,4 +1,4 @@
-Created: 2026-06-05T13:00:34
+Created: 2026-08-17T19:11:30
 
 === Field / parameters ===
 field   = NE

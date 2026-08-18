@@ -1,0 +1,57 @@
+% Requires \usepackage{longtable}
+\begingroup
+\small
+\begin{longtable}{r p{0.13\textwidth} p{0.23\textwidth} p{0.50\textwidth}}
+\caption{Description of columns in the machine-readable emission-region property catalog. The repeated line-flux columns use the placeholder $<$line$>$; the CSV contains these columns for Halpha, Hbeta, [OIII]5007, [NII]6583, [SII]6716, [SII]6731, [OII]3727.\label{tab:catalog_columns}}\\
+\hline
+Column number & Units & Label & Description \\
+\hline
+\endfirsthead
+\caption[]{Description of columns in the machine-readable emission-region property catalog (continued).}\\
+\hline
+Column number & Units & Label & Description \\
+\hline
+\endhead
+\hline
+\multicolumn{4}{r}{Continued on next page}\\
+\endfoot
+\hline
+\endlastfoot
+1 & \nodata & ID & Emission-region identifier. \\
+2 & \nodata & Field & M33 SITELLE field containing the region. \\
+3 & deg & RA\_deg & Right ascension of the region center in decimal degrees (J2000). \\
+4 & deg & Dec\_deg & Declination of the region center in decimal degrees (J2000). \\
+5 & spaxels & N\_spaxels & Number of spaxels assigned to the emission-region boundary. \\
+6 & pc & R\_c\_pc & Circularized equal-area radius from the domain/boundary code. \\
+7 & pc & R\_16\_pc & 16th-percentile boundary radius from the domain/boundary code. \\
+8 & pc & R\_50\_pc & Median boundary radius from the domain/boundary code. \\
+9 & pc & R\_84\_pc & 84th-percentile boundary radius from the domain/boundary code. \\
+10-44 & \nodata & $<$line$>$\_flux\_*; $<$line$>$\_SNR & Repeated emission-line flux and SNR columns. For each available line, the CSV includes raw integrated flux before extinction correction and DIG/background subtraction; extinction-corrected integrated flux before DIG/background subtraction; extinction-corrected integrated flux after DIG/background subtraction; one-sigma uncertainty on the observed/raw integrated flux before DIG/background subtraction; signal-to-noise ratio of the observed/raw integrated flux before DIG/background subtraction. Flux columns have units erg s$^{-1}$ cm$^{-2}$, while SNR columns are dimensionless. \\
+45 & mag & A\_V\_mag & Visual extinction inferred from the Balmer decrement. \\
+46 & mag & E\_BV\_mag & Color excess inferred from the Balmer decrement. \\
+47 & \nodata & BPT\_class & BPT classification from extinction-corrected integrated line ratios. \\
+48 & erg s$^{-1}$ & L\_Halpha\_raw & Observed Halpha luminosity before extinction correction and DIG/background subtraction. \\
+49 & erg s$^{-1}$ & L\_Halpha\_dered & Extinction-corrected Halpha luminosity before DIG/background subtraction. \\
+50 & erg s$^{-1}$ & L\_Halpha\_bgsub & Extinction-corrected Halpha luminosity after DIG/background subtraction. \\
+51 & \nodata & has\_WR & Boolean flag for whether the region boundary contains a cataloged WR star. \\
+52 & \nodata & has\_SNR & Boolean flag for whether the region boundary contains a cataloged supernova remnant. \\
+53 & \nodata & has\_PN & Boolean flag for whether the region boundary contains a cataloged planetary nebula. \\
+54 & \nodata & primary & Boolean flag indicating the primary retained region where field overlaps create duplicate detections. \\
+55 & km s$^{-1}$ & v\_helio\_mean\_kms & Mean heliocentric velocity across finite spaxels inside the emission-region boundary. \\
+56 & km s$^{-1}$ & v\_helio\_mean\_err\_kms & Propagated one-sigma uncertainty on the mean heliocentric velocity. \\
+57 & km s$^{-1}$ & sigma\_mean\_kms & Mean velocity dispersion from the sigma map across finite spaxels inside the emission-region boundary. \\
+58 & km s$^{-1}$ & sigma\_mean\_err\_kms & Propagated one-sigma uncertainty on the mean velocity dispersion. \\
+59 & spaxels & n\_kinematic\_spaxels & Number of finite spaxels used for the region-averaged kinematic measurements. \\
+60 & cm$^{-3}$ & ne & Electron density from the [S II] 6716/6731 ratio. \\
+61 & cm$^{-3}$ & ne\_err\_minus & Lower one-sigma Monte Carlo uncertainty on the electron density. \\
+62 & cm$^{-3}$ & ne\_err\_plus & Upper one-sigma Monte Carlo uncertainty on the electron density. \\
+63 & K cm$^{-3}$ & Pthermal & Thermal pressure divided by Boltzmann constant from [S II] electron density. \\
+64 & K cm$^{-3}$ & Pthermal\_err\_minus & Lower one-sigma Monte Carlo uncertainty on thermal pressure divided by Boltzmann constant. \\
+65 & K cm$^{-3}$ & Pthermal\_err\_plus & Upper one-sigma Monte Carlo uncertainty on thermal pressure divided by Boltzmann constant. \\
+66 & dex & logU\_KK04 & Ionization parameter from the calibration of \citet{Kobulnicky_2004}. \\
+67 & dex & logU\_KK04\_err & One-sigma uncertainty on the ionization parameter. \\
+68-77 & dex & Z\_$<$calibration$>$\_$<$ref$>$ & Oxygen abundance 12+log(O/H). Available calibration/reference columns: Z\_N2\_Brazzini2024 (N2 \citet{Brazzini_2024}); Z\_N2\_Brown2016 (N2 \citet{Brown_2016}); Z\_N2\_Curti2017 (N2 \citet{Curti_2017}); Z\_N2\_Maiolino2008 (N2 \citet{Maiolino_2008}); Z\_N2\_M2013 (N2 \citet{Marino_2013}); Z\_O3N2\_Brazzini2024 (O3N2 \citet{Brazzini_2024}); Z\_O3N2\_Curti2017 (O3N2 \citet{Curti_2017}); Z\_O3N2\_M2013 (O3N2 \citet{Marino_2013}); Z\_R23\_Curti2017 (R23 \citet{Curti_2017}); Z\_R3\_Brazzini2024 (R3 \citet{Brazzini_2024}). \\
+78-87 & dex & Z\_err\_$<$calibration$>$\_$<$ref$>$ & One-sigma uncertainties corresponding to the metallicity columns. Available uncertainty columns: Z\_N2\_Brazzini2024\_e; Z\_N2\_Brown2016\_e; Z\_N2\_Curti2017\_e; Z\_N2\_Maiolino2008\_e; Z\_N2\_M2013\_e; Z\_O3N2\_Brazzini2024\_e; Z\_O3N2\_Curti2017\_e; Z\_O3N2\_M2013\_e; Z\_R23\_Curti2017\_e; Z\_R3\_Brazzini2024\_e. \\
+\hline
+\end{longtable}
+\endgroup

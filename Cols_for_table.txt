@@ -1,0 +1,38 @@
+ID
+Field
+RA, Dec
+Number of spaxels in that region
+Radius values from domain/boundary code:R_c, R_16, R_50, R_84
+Fluxes: three columns for each line
+- <line>_flux_raw (for observed)
+- <line>_flux_dered (for after extinction correction)
+- <line>_flux_bgsub (for after extinction correction and after dig subtraction)
+<line>_flux_err
+<line>_SNR
+Av, E(B-V)
+BPT class - star forming, composite, agn/shock
+H alpha luminosity: 3 versions - observed, after extinction correction, after extinction+dig subtraction
+WR star/SNR/PN flag (separate column for each)
+PRIMARY (True/False depending on if the region overlaps with one from another field)
+Electron density + error
+Thermal pressure + error
+logU + error
+Metallicities: value + error, use all the indicators included in Table called metallicity_gradient_slopes.
+
+***************************************
+General format for descriptive tables: (from AAS website)
+\begin{deluxetable}{cccc}
+\tablecaption{A very wide table!}
+\tablehead{
+   \colhead{Row number} & \colhead{Units} & \colhead{Label} & \colhead{Description}
+}
+\startdata
+1 & \nodata & ID & Source identifier \\
+2 & deg & RAdeg & Right Ascension in decimal degrees (J2000) \\
+3 & deg & DEdeg & Declination in decimal degrees (J2000) \\
+...
+100 & \nodata & Note & Additional notes \\
+\enddata
+\tablecomments{Table X is published in its entirety in the electronic 
+edition of the {\it Astrophysical Journal}.  A portion is shown here 
+for guidance regarding its form and content.}

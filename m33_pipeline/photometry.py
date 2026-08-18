@@ -5,7 +5,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 from astropy.io import fits
-from scipy.ndimage import binary_dilation
+from scipy.ndimage import binary_dilation, gaussian_filter
 
 from .config import PhotometryConfig
 from .io import read_catalog, read_fits_data, write_catalog
@@ -71,6 +71,55 @@ def zoi_annulus_mask(zoi_map: np.ndarray, boundary_map: np.ndarray, region_id: i
     return zoi_mask & (~region_mask)
 
 
+def _scaled_local_background_mask(
+    zoi_map: np.ndarray,
+    boundary_map: np.ndarray,
+    region_id: int,
+    config: PhotometryConfig,
+) -> tuple[np.ndarray, dict[str, int | float | str]]:
+    """Build a local background shell inside the region ZoI, excluding all H II boundaries."""
+    region_mask = np.asarray(boundary_map == region_id, dtype=bool)
+    zoi_mask = np.asarray(zoi_map == region_id, dtype=bool)
+    all_region_mask = np.asarray(np.isfinite(boundary_map) & (boundary_map > 0), dtype=bool)
+    background_map = zoi_mask & (~all_region_mask)
+    npix_region = int(np.sum(region_mask))
+
+    if npix_region <= 0:
+        return background_map & False, {
+            "dig_annulus_inner_px": int(config.dig_annulus_inner_px),
+            "dig_annulus_width_px": 0,
+            "dig_annulus_outer_px": int(config.dig_annulus_inner_px),
+            "dig_annulus_source": "empty_region",
+        }
+
+    equivalent_radius_px = float(np.sqrt(npix_region / np.pi))
+    width_px = int(np.ceil(equivalent_radius_px * float(config.dig_annulus_width_fraction)))
+    width_px = max(width_px, int(config.dig_annulus_min_width_px))
+    width_px = min(width_px, int(config.dig_annulus_max_width_px))
+    inner_px = max(int(config.dig_annulus_inner_px), 0)
+    outer_px = inner_px + width_px
+
+    outer_mask = binary_dilation(region_mask, iterations=max(outer_px, 1))
+    if inner_px > 0:
+        inner_mask = binary_dilation(region_mask, iterations=inner_px)
+    else:
+        inner_mask = region_mask
+    local_mask = outer_mask & (~inner_mask) & background_map
+    if np.any(local_mask):
+        source = "local_zoi_annulus"
+        background_mask = local_mask
+    else:
+        source = "full_zoi_background"
+        background_mask = background_map
+
+    return background_mask, {
+        "dig_annulus_inner_px": inner_px,
+        "dig_annulus_width_px": width_px,
+        "dig_annulus_outer_px": outer_px,
+        "dig_annulus_source": source,
+    }
+
+
 def robust_dig_background(
     flux: np.ndarray,
     annulus_mask: np.ndarray,
@@ -102,8 +151,8 @@ def robust_dig_background(
             break
         working = clipped
 
-    # Use a low percentile of the *positive* annulus values so DIG subtraction is
-    # intentionally conservative and can only subtract flux, never add it back.
+    # Use the requested percentile of positive, sigma-clipped background values
+    # so the background subtraction can only subtract flux, never add it back.
     positive_working = working[working > 0]
     if positive_working.size == 0:
         bg_level = 0.0
@@ -119,6 +168,33 @@ def robust_dig_background(
         "n_annulus": int(vals.size),
         "n_annulus_used": int(working.size),
         "dig_clip_upper": float(clip_upper) if np.isfinite(clip_upper) else np.nan,
+    }
+
+
+def _smoothed_masked_background_map(
+    flux: np.ndarray,
+    boundary_map: np.ndarray,
+    config: PhotometryConfig,
+) -> tuple[np.ndarray, dict[str, float | int]]:
+    """Estimate a smooth line-background map after masking all H II boundaries."""
+    flux = np.asarray(flux, dtype=float)
+    all_region_mask = np.asarray(np.isfinite(boundary_map) & (boundary_map > 0), dtype=bool)
+    valid_background = np.isfinite(flux) & (~all_region_mask)
+    positive_background = np.where(valid_background & (flux > 0), flux, 0.0)
+    weights = valid_background.astype(float)
+
+    sigma = float(config.dig_background_smooth_sigma_px)
+    smoothed_flux = gaussian_filter(positive_background, sigma=sigma, mode="nearest")
+    smoothed_weight = gaussian_filter(weights, sigma=sigma, mode="nearest")
+    min_weight = float(config.dig_background_min_weight)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        background = smoothed_flux / smoothed_weight
+    background[(smoothed_weight <= min_weight) | ~np.isfinite(background)] = np.nan
+    background = np.where(np.isfinite(background) & (background > 0), background, 0.0)
+    return background, {
+        "dig_background_smooth_sigma_px": sigma,
+        "dig_background_min_weight": min_weight,
+        "dig_background_npix": int(np.sum(valid_background)),
     }
 
 
@@ -168,6 +244,62 @@ def integrated_flux_and_snr(flux, err, region_mask, background_per_pixel=np.nan,
         "F_bgsub": flux_bgsub,
         "SNR_bgsub": snr_bgsub,
     }
+
+
+def _background_subtracted_flux(raw_flux, npix_region, background_per_pixel) -> float:
+    if not np.isfinite(raw_flux) or not np.isfinite(npix_region) or not np.isfinite(background_per_pixel):
+        return np.nan
+    return float(raw_flux) - float(background_per_pixel) * float(npix_region)
+
+
+def _select_nonnegative_dig_background(
+    raw_flux,
+    npix_region,
+    local_background=np.nan,
+) -> tuple[float, float, str]:
+    """Choose a DIG background that does not drive the integrated flux negative."""
+    local_background = _positive_or_zero(local_background)
+    flux_local = _background_subtracted_flux(raw_flux, npix_region, local_background)
+    if np.isfinite(flux_local) and flux_local >= 0:
+        return local_background, flux_local, "local_line"
+
+    return 0.0, float(raw_flux) if np.isfinite(raw_flux) else np.nan, "none_negative_guard"
+
+
+def _select_capped_dig_background(
+    raw_flux,
+    npix_region,
+    model_background_flux,
+    max_subtraction_fraction,
+) -> tuple[float, float, float, str]:
+    """Choose a capped integrated DIG background that cannot make a flux negative."""
+    if not np.isfinite(raw_flux):
+        return np.nan, np.nan, np.nan, "invalid_raw_flux"
+    if not np.isfinite(npix_region) or float(npix_region) <= 0:
+        return 0.0, float(raw_flux), np.nan, "none_empty_region"
+    if float(raw_flux) <= 0:
+        return 0.0, float(raw_flux), 0.0, "none_nonpositive_raw_flux"
+
+    model_background_flux = _positive_or_zero(model_background_flux)
+    max_fraction = max(float(max_subtraction_fraction), 0.0)
+    cap = max_fraction * float(raw_flux)
+    selected_background_flux = min(model_background_flux, cap)
+    selected_background_flux = min(selected_background_flux, float(raw_flux))
+    corrected_flux = float(raw_flux) - selected_background_flux
+    if corrected_flux < 0:
+        selected_background_flux = 0.0
+        corrected_flux = float(raw_flux)
+        method = "none_negative_guard"
+    elif model_background_flux > cap:
+        method = "smoothed_map_capped"
+    elif selected_background_flux > 0:
+        method = "smoothed_map"
+    else:
+        method = "none_zero_background"
+
+    background_per_pixel = selected_background_flux / float(npix_region)
+    fraction = selected_background_flux / float(raw_flux) if raw_flux > 0 else np.nan
+    return background_per_pixel, corrected_flux, fraction, method
 
 
 def merge_check_duplicates(left_df, right_df, on, how: str = "left", suffixes=("_x", "_y"), rtol=0, atol=0):
@@ -314,12 +446,12 @@ def _apply_active_flux_columns(df: pd.DataFrame, line_names: list[str], dig_mode
         base_err = f"F_{line_name}_e_sum_nodig"
         base_snr = f"SNR_{line_name}_sum_nodig"
         dig_flux = f"F_{line_name}_sum_digsub"
-        dig_err = f"F_{line_name}_e_sum_digsub"
-        dig_snr = f"SNR_{line_name}_sum_digsub"
         if dig_mode == "dig_subtracted":
             out[f"F_{line_name}_sum"] = out[dig_flux]
-            out[f"F_{line_name}_e_sum"] = out[dig_err]
-            out[f"SNR_{line_name}_sum"] = out[dig_snr]
+            out[f"F_{line_name}_e_sum"] = out[base_err]
+            # Use observed/no-DIG line detections for S/N cuts. DIG subtraction can
+            # drive valid bright regions negative in weak lines.
+            out[f"SNR_{line_name}_sum"] = out[base_snr]
         else:
             out[f"F_{line_name}_sum"] = out[base_flux]
             out[f"F_{line_name}_e_sum"] = out[base_err]
@@ -361,43 +493,6 @@ def _positive_or_zero(value) -> float:
     return max(value, 0.0)
 
 
-def _region_halpha_dig_anchor(
-    region_id: int,
-    maps: dict[str, tuple[np.ndarray, np.ndarray]],
-    annulus_mask: np.ndarray,
-    config: PhotometryConfig,
-    boundary_metrics_df: pd.DataFrame | None = None,
-) -> tuple[float, str, dict[str, float | int]]:
-    if boundary_metrics_df is not None and not boundary_metrics_df.empty:
-        match = boundary_metrics_df.loc[boundary_metrics_df["zoi_center_label"] == region_id]
-        if not match.empty and "bg_local" in match.columns:
-            bg_local = _positive_or_zero(match.iloc[0]["bg_local"])
-            return bg_local, "boundary_bg_local", {
-                "dig_median": bg_local,
-                "dig_mad": np.nan,
-                "n_annulus": int(np.sum(annulus_mask)),
-                "n_annulus_used": int(np.sum(annulus_mask)),
-                "dig_clip_upper": np.nan,
-            }
-
-    halpha_flux, _halpha_err = maps["Halpha"]
-    dig = robust_dig_background(
-        halpha_flux,
-        annulus_mask,
-        clip_sigma=config.dig_clip_sigma,
-        clip_iterations=config.dig_clip_iterations,
-        background_percentile=config.dig_background_percentile,
-    )
-    dig["dig_median"] = _positive_or_zero(dig["dig_median"])
-    return float(dig["dig_median"]), "annulus_halpha", dig
-
-
-def _dig_background_for_line(halpha_anchor: float, line_name: str, config: PhotometryConfig) -> float:
-    ratio = float(config.dig_line_ratio_to_halpha.get(line_name, 0.0))
-    ratio = max(ratio, 0.0)
-    return max(float(halpha_anchor), 0.0) * ratio
-
-
 def add_peak_pixel_fluxes(
     df: pd.DataFrame,
     maps: dict[str, tuple[np.ndarray, np.ndarray]],
@@ -436,17 +531,17 @@ def add_peak_pixel_fluxes(
             else np.full(len(out), np.nan, dtype=float)
         )
         digsub_flux = raw_flux - background
+        digsub_flux = np.where(np.isfinite(digsub_flux) & (digsub_flux >= 0), digsub_flux, raw_flux)
         active_flux = digsub_flux if dig_mode == "dig_subtracted" else raw_flux
         with np.errstate(divide="ignore", invalid="ignore"):
-            active_snr = active_flux / raw_err
+            observed_snr = raw_flux / raw_err
 
         out[f"F_{line_name}_peak_nodig"] = raw_flux
         out[f"F_{line_name}_e_peak_nodig"] = raw_err
         out[f"F_{line_name}_peak_digsub"] = digsub_flux
-        out[f"F_{line_name}_e_peak_digsub"] = raw_err
         out[f"F_{line_name}_peak"] = active_flux
         out[f"F_{line_name}_e_peak"] = raw_err
-        out[f"SNR_{line_name}_peak"] = active_snr
+        out[f"SNR_{line_name}_peak"] = observed_snr
         out["peak_pixel_valid"] |= in_bounds & np.isfinite(raw_flux) & np.isfinite(raw_err)
 
     return out
@@ -461,52 +556,58 @@ def _compute_dig_background_catalog(
 ) -> pd.DataFrame:
     labels = np.unique(boundary_map[np.isfinite(boundary_map)])
     labels = labels[labels > 0].astype(int)
+    background_maps = {
+        line_name: _smoothed_masked_background_map(flux, boundary_map, config)
+        for line_name, (flux, _err) in maps.items()
+    }
     rows = []
     for region_id in labels:
         region_mask = boundary_map == region_id
-        annulus_mask = zoi_annulus_mask(zoi_map, boundary_map, region_id)
-        halpha_anchor, dig_source, halpha_dig = _region_halpha_dig_anchor(
-            region_id,
-            maps,
-            annulus_mask,
-            config,
-            boundary_metrics_df=boundary_metrics_df,
-        )
+        background_mask, annulus_info = _scaled_local_background_mask(zoi_map, boundary_map, region_id, config)
         row = {
             "region_id": region_id,
             "npix_region": int(np.sum(region_mask)),
-            "npix_dig_annulus": int(np.sum(annulus_mask)),
-            "dig_halpha_anchor": halpha_anchor,
-            "dig_halpha_source": dig_source,
+            "npix_dig_annulus": int(np.sum(background_mask)),
+            **annulus_info,
         }
         for line_name, (flux, err) in maps.items():
-            background_per_pixel = _dig_background_for_line(halpha_anchor, line_name, config)
-            stats = integrated_flux_and_snr(
+            background_map, background_info = background_maps[line_name]
+            region_background_values = np.asarray(background_map, dtype=float)[region_mask]
+            finite_background = region_background_values[np.isfinite(region_background_values)]
+            model_background_flux = float(np.sum(finite_background)) if finite_background.size else 0.0
+            raw_stats = integrated_flux_and_snr(
                 flux=flux,
                 err=err,
                 region_mask=region_mask,
-                background_per_pixel=background_per_pixel,
-                clip_negative_after_bg=config.clip_negative_after_bg,
+                background_per_pixel=np.nan,
+                clip_negative_after_bg=False,
             )
-            row[f"F_{line_name}_sum_nodig"] = stats["F_raw"]
-            row[f"F_{line_name}_e_sum_nodig"] = stats["sigma_F"]
-            row[f"SNR_{line_name}_sum_nodig"] = stats["SNR_raw"]
+            background_per_pixel, flux_bgsub, background_fraction, background_method = _select_capped_dig_background(
+                raw_stats["F_raw"],
+                raw_stats["npix"],
+                model_background_flux,
+                config.dig_max_subtraction_fraction,
+            )
+            row[f"F_{line_name}_sum_nodig"] = raw_stats["F_raw"]
+            row[f"F_{line_name}_e_sum_nodig"] = raw_stats["sigma_F"]
+            row[f"SNR_{line_name}_sum_nodig"] = raw_stats["SNR_raw"]
             row[f"{line_name}_dig_median"] = background_per_pixel
+            row[f"{line_name}_dig_local_median"] = background_per_pixel
+            row[f"{line_name}_dig_method"] = background_method
             row[f"{line_name}_dig_mad"] = (
-                float(halpha_dig["dig_mad"]) * (background_per_pixel / halpha_anchor)
-                if halpha_anchor > 0 and np.isfinite(halpha_dig["dig_mad"])
+                float(1.4826 * np.nanmedian(np.abs(finite_background - np.nanmedian(finite_background))))
+                if finite_background.size
                 else np.nan
             )
-            row[f"{line_name}_dig_clip_upper"] = (
-                float(halpha_dig["dig_clip_upper"]) * (background_per_pixel / halpha_anchor)
-                if halpha_anchor > 0 and np.isfinite(halpha_dig["dig_clip_upper"])
-                else np.nan
-            )
-            row[f"{line_name}_dig_npix"] = halpha_dig["n_annulus"]
-            row[f"{line_name}_dig_npix_used"] = halpha_dig["n_annulus_used"]
-            row[f"F_{line_name}_sum_digsub"] = stats["F_bgsub"]
-            row[f"F_{line_name}_e_sum_digsub"] = stats["sigma_F"]
-            row[f"SNR_{line_name}_sum_digsub"] = stats["SNR_bgsub"]
+            row[f"{line_name}_dig_clip_upper"] = np.nan
+            row[f"{line_name}_dig_npix"] = background_info["dig_background_npix"]
+            row[f"{line_name}_dig_npix_used"] = int(finite_background.size)
+            row[f"{line_name}_dig_model_sum"] = model_background_flux
+            row[f"{line_name}_dig_subtracted_sum"] = background_per_pixel * raw_stats["npix"]
+            row[f"{line_name}_dig_fraction_raw"] = background_fraction
+            row[f"{line_name}_dig_background_smooth_sigma_px"] = background_info["dig_background_smooth_sigma_px"]
+            row[f"{line_name}_dig_max_subtraction_fraction"] = config.dig_max_subtraction_fraction
+            row[f"F_{line_name}_sum_digsub"] = flux_bgsub
         rows.append(row)
     return pd.DataFrame(rows).sort_values("region_id").reset_index(drop=True)
 
@@ -622,20 +723,34 @@ def build_integrated_spectrum_flux_catalog(field: str, max_zoi_pc: int, config: 
         merged_flux_df[f"F_{line_name}_sum_nodig"] = merged_flux_df[raw_flux_col]
         merged_flux_df[f"F_{line_name}_e_sum_nodig"] = merged_flux_df[raw_err_col]
         merged_flux_df[f"SNR_{line_name}_sum_nodig"] = merged_flux_df[raw_snr_col]
-        background = merged_flux_df[f"{line_name}_dig_median"].to_numpy(dtype=float)
         npix_region = merged_flux_df["npix_region"].to_numpy(dtype=float)
         raw_flux = merged_flux_df[raw_flux_col].to_numpy(dtype=float)
-        raw_err = merged_flux_df[raw_err_col].to_numpy(dtype=float)
-        with np.errstate(invalid="ignore"):
-            dig_flux = raw_flux - background * npix_region
+        if f"{line_name}_dig_model_sum" in merged_flux_df.columns:
+            model_background_flux = merged_flux_df[f"{line_name}_dig_model_sum"].to_numpy(dtype=float)
+        else:
+            background_per_pixel = merged_flux_df[f"{line_name}_dig_median"].to_numpy(dtype=float)
+            model_background_flux = background_per_pixel * npix_region
+        selected_background = np.full(len(merged_flux_df), np.nan, dtype=float)
+        dig_flux = np.full(len(merged_flux_df), np.nan, dtype=float)
+        dig_fraction = np.full(len(merged_flux_df), np.nan, dtype=float)
+        dig_method = np.full(len(merged_flux_df), "", dtype=object)
+        for i in range(len(merged_flux_df)):
+            selected_background[i], dig_flux[i], dig_fraction[i], dig_method[i] = _select_capped_dig_background(
+                raw_flux[i],
+                npix_region[i],
+                model_background_flux[i],
+                config.dig_max_subtraction_fraction,
+            )
+        merged_flux_df[f"{line_name}_dig_median"] = selected_background
+        merged_flux_df[f"{line_name}_dig_local_median"] = selected_background
+        merged_flux_df[f"{line_name}_dig_method"] = dig_method
+        merged_flux_df[f"{line_name}_dig_subtracted_sum"] = selected_background * npix_region
+        merged_flux_df[f"{line_name}_dig_fraction_raw"] = dig_fraction
         merged_flux_df[f"F_{line_name}_sum_digsub"] = dig_flux
-        merged_flux_df[f"F_{line_name}_e_sum_digsub"] = raw_err
-        with np.errstate(divide="ignore", invalid="ignore"):
-            merged_flux_df[f"SNR_{line_name}_sum_digsub"] = dig_flux / raw_err
     merged_flux_df = _mask_negative_fluxes(
         merged_flux_df,
         list(maps),
-        prefixes=["sum", "sum_nodig", "sum_digsub"],
+        prefixes=["sum", "sum_nodig"],
     )
     merged_flux_df = _apply_active_flux_columns(merged_flux_df, list(maps), dig_mode=dig_mode)
     if {"F_Halpha_sum_nodig", "F_Halpha_sum_digsub"}.issubset(merged_flux_df.columns):

@@ -1,4 +1,4 @@
-Created: 2026-06-05T13:58:10
+Created: 2026-08-17T20:10:49
 
 === Field / parameters ===
 field   = F7

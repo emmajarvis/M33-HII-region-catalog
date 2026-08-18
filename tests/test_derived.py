@@ -11,6 +11,7 @@ from m33_pipeline.derived import (
     add_peak_region_properties,
     add_symmetry_class,
     add_thermal_pressure,
+    metallicity_valid_range_summary,
     merge_field_flux_catalogs,
 )
 
@@ -132,6 +133,48 @@ class DerivedTest(unittest.TestCase):
         self.assertTrue(pd.notna(out.loc[0, "Z_R23_Maiolino2008"]))
         self.assertTrue(pd.notna(out.loc[0, "Z_R23_Curti2017"]))
         self.assertTrue(pd.notna(out.loc[0, "Z_R3_Curti2017"]))
+
+    def test_brazzini_n2s2halpha_uses_upper_branch(self):
+        df = pd.DataFrame(
+            {
+                "F_Halpha_sum_dered": [1.0],
+                "F_Hbeta_sum_dered": [0.35],
+                "F_[NII]6583_sum_dered": [0.328],
+                "F_[SII]6716_sum_dered": [0.45],
+                "F_[SII]6731_sum_dered": [0.3885],
+                "F_[OIII]5007_sum_dered": [0.4],
+                "F_[OII]3727_sum_dered": [0.5],
+            }
+        )
+
+        out = add_metallicity_columns(df, use_odr=False)
+
+        self.assertGreater(out.loc[0, "Z_N2S2Halpha_Brazzini2024"], 8.0)
+        self.assertLess(out.loc[0, "Z_N2S2Halpha_Brazzini2024"], 8.5)
+
+    def test_metallicity_values_outside_valid_range_are_rejected(self):
+        df = pd.DataFrame(
+            {
+                "F_Halpha_sum_dered": [1.0],
+                "F_Hbeta_sum_dered": [0.3],
+                "F_[NII]6583_sum_dered": [0.003],
+                "F_[SII]6716_sum_dered": [0.08],
+                "F_[SII]6731_sum_dered": [0.07],
+                "F_[OIII]5007_sum_dered": [0.4],
+                "F_[OII]3727_sum_dered": [0.5],
+            }
+        )
+
+        out = add_metallicity_columns(df, use_odr=False)
+
+        self.assertTrue(np.isnan(out.loc[0, "Z_N2S2Halpha_Brazzini2024"]))
+
+    def test_metallicity_valid_range_summary_lists_references(self):
+        summary = metallicity_valid_range_summary()
+        row = summary.loc[summary["column"] == "Z_N2S2Halpha_Brazzini2024"].iloc[0]
+        self.assertEqual(row["reference"], "Brazzini et al. 2024")
+        self.assertEqual(row["indicator"], "N2S2Halpha")
+        self.assertEqual(row["valid_12logOH_min"], 7.50)
 
     def test_electron_density_flags_low_density_limit_and_does_not_report_biased_mc_value(self):
         df = pd.DataFrame(

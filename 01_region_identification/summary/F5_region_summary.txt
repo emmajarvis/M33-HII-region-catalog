@@ -2,15 +2,15 @@ Field: F5
 
 Region Identification Summary
 
-- input_peaks: 746
-- saddle_removed: 5
+- input_peaks: 962
+- saddle_removed: 8
 - edge_removed: 0
-- candidate_peaks: 741
-- zoi_small_removed: 7
+- candidate_peaks: 954
+- zoi_small_removed: 12
 - zoi_duplicate_removed: 0
-- final_peaks_after_zoi: 734
-- boundary_small_removed: 9
-- final_regions_after_boundary: 725
+- final_peaks_after_zoi: 942
+- boundary_small_removed: 10
+- final_regions_after_boundary: 932
 - max_zoi_pc: 100
 - min_domain_valid_pixels: 20
 - min_valid_pixels_threshold: 20

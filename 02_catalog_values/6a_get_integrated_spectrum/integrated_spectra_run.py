@@ -3,37 +3,54 @@
 
 import logging
 # logging.disable(logging.CRITICAL)
+import argparse
 import multiprocessing as mp
 from tqdm import tqdm
 from datetime import datetime
-
-import sys
 
 from integrated_spectra_functions import (
     build_empty_flux_table,
     load_context,
     run_region_fit,
+    normalize_field,
 )
 
 WORKER_CTX = None
 WORKER_PLOTSHOW = False
+WORKER_MAKE_SPECTRUM_PLOT = False
 
 
-def init_worker(field, base_output_folder, output_timestamp, plotshow):
-    global WORKER_CTX, WORKER_PLOTSHOW
+def init_worker(
+    field,
+    base_output_folder,
+    output_timestamp,
+    plotshow,
+    alignment_folder,
+    alignment_diagnostic_regions,
+    make_spectrum_plot,
+):
+    global WORKER_CTX, WORKER_PLOTSHOW, WORKER_MAKE_SPECTRUM_PLOT
     WORKER_CTX = load_context(
         field,
         base_output_folder=base_output_folder,
-        output_timestamp=output_timestamp
+        output_timestamp=output_timestamp,
+        alignment_folder=alignment_folder,
+        alignment_diagnostic_regions=alignment_diagnostic_regions,
     )
     WORKER_PLOTSHOW = plotshow
+    WORKER_MAKE_SPECTRUM_PLOT = make_spectrum_plot
 
 
 def process_region(ireg):
-    global WORKER_CTX, WORKER_PLOTSHOW
+    global WORKER_CTX, WORKER_PLOTSHOW, WORKER_MAKE_SPECTRUM_PLOT
 
     try:
-        result = run_region_fit(WORKER_CTX, ireg, plotshow=WORKER_PLOTSHOW)
+        result = run_region_fit(
+            WORKER_CTX,
+            ireg,
+            plotshow=WORKER_PLOTSHOW,
+            make_spectrum_plot=WORKER_MAKE_SPECTRUM_PLOT,
+        )
         return {
             "ok": True,
             "result": result,
@@ -49,32 +66,58 @@ def process_region(ireg):
         }
 
 
-VALID_FIELDS = {'NW', 'NE', 'SE', 'SW', '7', '8', '9'}
+VALID_FIELDS = {'NW', 'NE', 'SE', 'SW', '5', '6', '7', '8', '9'}
+
+
+def parse_region_list(text):
+    if not text:
+        return None
+    return {int(item.strip()) for item in text.split(',') if item.strip()}
 
 
 def parse_args():
-    if len(sys.argv) < 2:
-        print("Usage: python integrated_spectra_run.py <FIELD>")
-        print("Example: python integrated_spectra_run.py SE")
-        print("Valid fields:", ", ".join(sorted(VALID_FIELDS)))
-        sys.exit(1)
+    parser = argparse.ArgumentParser(
+        description="Fit integrated spectra for one M33 field on CANFAR."
+    )
+    parser.add_argument("field", help="Field name, e.g. SE, NW, 7, or F7")
+    parser.add_argument(
+        "--alignment-folder",
+        default=None,
+        help=(
+            "Folder containing parametres_align_cube_corrige_SN1_FIELD.txt and "
+            "parametres_align_cube_corrige_SN2_FIELD.txt. '~' is supported."
+        ),
+    )
+    parser.add_argument(
+        "--alignment-diagnostic-regions",
+        default=None,
+        help="Comma-separated region IDs for boundary-over-flux alignment plots, e.g. 12,45,103.",
+    )
+    parser.add_argument(
+        "--make-spectrum-plots",
+        action="store_true",
+        help="Save the full integrated-spectrum plot for every fitted region.",
+    )
+    parser.add_argument(
+        "--plotshow",
+        action="store_true",
+        help="Show interactive plot windows in addition to saving plots.",
+    )
+    args = parser.parse_args()
 
-    field = str(sys.argv[1])
+    args.field = normalize_field(args.field)
 
-    if field not in VALID_FIELDS:
-        print(f"Invalid field: {field}")
-        print("Valid fields:", ", ".join(sorted(VALID_FIELDS))) 
-        sys.exit(1)
+    if args.field not in VALID_FIELDS:
+        parser.error(f"Invalid field: {args.field}. Valid fields: {', '.join(sorted(VALID_FIELDS))}")
 
-    return field
+    args.alignment_diagnostic_regions = parse_region_list(args.alignment_diagnostic_regions)
+    return args
 
 
 def main():
     
-    field = parse_args()
-
-    # change this if you do not want interactive plot windows
-    plotshow = False
+    args = parse_args()
+    field = args.field
 
     # One timestamp for the whole run, shared by the main process and all workers.
     output_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -86,7 +129,9 @@ def main():
     ctx = load_context(
         field,
         base_output_folder=base_output_folder,
-        output_timestamp=output_timestamp
+        output_timestamp=output_timestamp,
+        alignment_folder=args.alignment_folder,
+        alignment_diagnostic_regions=args.alignment_diagnostic_regions,
     )
     
     data_table_flux = build_empty_flux_table()
@@ -102,7 +147,15 @@ def main():
     with mp.Pool(
         processes=nproc,
         initializer=init_worker,
-        initargs=(field, base_output_folder, output_timestamp, plotshow),
+        initargs=(
+            field,
+            base_output_folder,
+            output_timestamp,
+            args.plotshow,
+            args.alignment_folder,
+            args.alignment_diagnostic_regions,
+            args.make_spectrum_plots,
+        ),
     ) as pool:
         for n_done, out in enumerate(
             tqdm(pool.imap_unordered(process_region, indices),
@@ -133,6 +186,11 @@ def main():
                     format='ascii'
                 )
 
+    data_table_flux.write(
+        f"{ctx.folder}/{ctx.field}_Data_flux.ascii",
+        overwrite=True,
+        format='ascii'
+    )
 
     print()
     print(f"Finished field {ctx.field}")

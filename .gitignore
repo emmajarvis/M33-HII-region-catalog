@@ -11,3 +11,6 @@ peak_files/data_for_visualisation_*/
 *.pdf
 *.jpg
 *.jpeg
+*.npy
+__pycache__/
+peak_completeness/results*/
